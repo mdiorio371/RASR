@@ -1,0 +1,2545 @@
+---
+title: "RASR_protocol"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+This script descibes the process of:
+  1. Downloading assembly information for NCBI sequence records
+  2. 
+
+
+## Setup 
+All libraries and custom functions used are available in this source document
+```{r}
+source("RASR_functions.R")
+## note package pbmapply is not available on Windows
+```
+
+The system command uses tools installed using conda
+```{r}
+current_path <- 
+  system("echo $PATH", intern = T)
+Sys.setenv(
+  PATH = paste(current_path, "/Users/diorio/anaconda3/bin/", sep = ":")
+  )
+"/Users/diorio/anaconda3/bin:/Users/diorio/mambaforge/condabin:/Library/Frameworks/Python.framework/Versions/3.7/bin:"
+system("echo $PATH", intern = T)
+#system("conda install -c bioconda mummer")
+
+```
+
+
+
+
+1. Acquiring the NCBI dataset
+
+a) Downloading assembly information for NCBI sequence records
+
+Use the dataset acquired from 26/01/21 (for reproducibility)
+
+```{r}
+ncbi_table <- 
+  readRDS("r_vars/current_table.rds") %>%
+  mutate(
+    species2 = 
+      unlist(
+        pbmclapply(
+          organism_name,
+          function(x){
+            spec_out <-
+              strsplit(x, " ")[[1]][1:2] %>% paste(collapse = " ")
+            spec_out_2 <-
+              strsplit(spec_out, " ")[[1]][2]
+            if (spec_out_2=="sp."){
+              spec_out <-
+                x
+                #strsplit(x, " ")[[1]][1:3] %>% paste(collapse = " ")
+            }
+            return(spec_out)
+          }
+        )
+      ) 
+    ) %>% 
+  dplyr::add_count(species2, name = "spec_count") %>%
+  filter(spec_count>=10)
+```
+
+## data handling
+```{r}
+dplyr::count(ncbi_table, species) %>% View
+
+
+nt_summary <- 
+  ncbi_table %>% group_by(p2, g) %>% 
+  count(species2) %>% ungroup %>% arrange(desc(n)) %>%
+  mutate(species = gsub(" ", "_", species2))
+
+
+cluster_info <- 
+  pbmclapply(
+    1:nrow(nt_summary),
+    function(i){
+      #for (i in 1:nrow(nt_summary)){
+      ip <- pull(nt_summary, p2)[i]
+      ig <- pull(nt_summary, g)[i]
+      isp <- pull(nt_summary, species)[i]
+      
+      if(length(strsplit(ip, " ")[[1]])==2){
+        ip <- 
+          sub(" ", "_", ip)
+      }
+      
+      stib <- 
+        fread(
+          sprintf(
+            "../mictools/results2/%s/%s/report_summary.csv",
+            ip, isp
+            )
+        )
+      
+      if ("clust" %in% colnames(stib)){
+        stib2 <- 
+          stib %>% 
+          dplyr::select(organism_name, clust, len, kmer_perc) %>%
+          summarise(
+            organism_name = isp,
+            phylum = ip,
+            clust =
+              clust[clust!="LOC"] %>% unique %>% length,
+            mean_len = round(mean(len, na.rm = T)),
+            mean_kmer = round(mean(kmer_perc, na.rm = T), 2),
+            records = n()
+          ) 
+      } else {
+        stib2 <- 
+          stib %>%
+          summarise(
+            organism_name = isp,
+            phylum = ip,
+            clust = NA,
+            mean_len = round(mean(len, na.rm = T)),
+            mean_kmer = NA,
+            records = nrow(stib)
+          ) 
+      }
+      
+      
+    }, mc.cores = 4
+  ) %>% 
+  bind_rows() %>%
+  arrange(desc(clust))
+
+
+cluster_info %>% nrow
+cluster_info %>% filter(clust>1) %>% nrow
+
+### checking for midpoint files
+
+mp_file <-
+  pbmclapply(
+    1:nrow(nt_summary),
+    function(i){
+      #for (i in 1:nrow(nt_summary)){
+      ip <- pull(nt_summary, p2)[i]
+      ig <- pull(nt_summary, g)[i]
+      isp <- pull(nt_summary, species)[i]
+      
+      if(length(strsplit(ip, " ")[[1]])==2){
+        ip <- 
+          sub(" ", "_", ip)
+      }
+      
+      rtib <- 
+          sprintf(
+            "../mictools/r_vars/%s/%s/all_midpoints.rds",
+            ip, isp
+            ) %>% file.exists()
+      
+      stib <- 
+        fread(
+          sprintf(
+            "../mictools/results2/%s/%s/report_summary.csv",
+            ip, isp
+            )
+        )
+      
+      clust_present <-
+        ("clust" %in% colnames(stib))
+      
+      if (clust_present){
+        clust_present <-
+          (stib %>% 
+          filter(clust != "LOC") %>%
+          pull(clust) %>%
+          unique %>%
+          length)>1
+      }
+      outtib <- 
+        tibble(
+          p = 
+            ip,
+          s = 
+            isp,
+          midpoints = 
+            rtib,
+          clusts = 
+            clust_present
+        )
+      
+      return(outtib)
+    }
+  ) %>%
+  bind_rows()
+
+
+
+
+inv_info1 <-
+  pbmclapply(
+    1:nrow(nt_summary),
+    function(i){
+      #for (i in 1:nrow(nt_summary)){
+      ip <- pull(nt_summary, p2)[i]
+      ig <- pull(nt_summary, g)[i]
+      isp <- pull(nt_summary, species)[i]
+      
+      if(length(strsplit(ip, " ")[[1]])==2){
+        ip <- 
+          sub(" ", "_", ip)
+      }
+      rtib_dest <- 
+        sprintf(
+            "../mictools/r_vars//%s/%s/all_midpoints.rds",
+            ip, isp
+            )
+      if (file.exists(rtib_dest)){
+        rtib1 <- 
+          readRDS(
+            rtib_dest
+          )
+        # shapiro.test(rtib1$midpoint)
+        # rtib1$midpoint  %>% density %>% plot
+        rtib <- 
+          rtib1 %>%
+          group_by(ref, qry) %>%
+          summarize(
+            mean_midpoint = mean(midpoint, na.rm =T),
+            inversions = n()
+          ) %>% arrange(desc(inversions))
+        
+        
+      } else{
+        rtib <-
+          tibble(
+            ref = NA,
+            qry = NA,
+            mean_midpoint = NA,
+            inversions = NA
+          )
+      }
+      rtib <-
+        rtib %>% 
+        mutate(
+          organism_name = isp,
+          phylum = ip
+        )
+      return(rtib)
+      
+    }, mc.cores = 4
+  ) %>% 
+  bind_rows() 
+
+ii_conf <- 
+  pbmclapply(
+    1:nrow(nt_summary),
+    function(i){
+      #for (i in 1:nrow(nt_summary)){
+      ip <- pull(nt_summary, p2)[i]
+      ig <- pull(nt_summary, g)[i]
+      isp <- pull(nt_summary, species)[i]
+      
+      if(length(strsplit(ip, " ")[[1]])==2){
+        ip <- 
+          sub(" ", "_", ip)
+      }
+      rtib_dest <- 
+        sprintf(
+            "../mictools/r_vars//%s/%s/all_midpoints.rds",
+            ip, isp
+            )
+      if (file.exists(rtib_dest)){
+        rtib1 <- 
+          readRDS(
+            rtib_dest
+          )
+        if (nrow(rtib1>=30)){
+          mp_t <- 
+            rtib1$midpoint
+          mptt <- t.test(mp_t, mu = 0.5, alternative = "two.sided")
+          rtib <- 
+            tibble(
+              organism_name = isp,
+              phylum = ip,
+              conf_low = mptt$conf.int[1],
+              conf_high = mptt$conf.int[2]
+            )
+            mptt$conf.int
+        }
+        
+        # shapiro.test(rtib1$midpoint)
+        # rtib1$midpoint  %>% density %>% plot
+        rtib <- 
+          rtib1 %>%
+          group_by(ref, qry) %>%
+          summarize(
+            mean_midpoint = mean(midpoint, na.rm =T),
+            inversions = n()
+          ) %>% arrange(desc(inversions))
+        
+        
+      } else{
+        rtib <-
+          tibble(
+            ref = NA,
+            qry = NA,
+            mean_midpoint = NA,
+            inversions = NA
+          )
+      }
+      rtib <-
+        rtib %>% 
+        mutate(
+          organism_name = isp,
+          phylum = ip
+        )
+      return(rtib)
+      
+    }, mc.cores = 4
+  ) %>% 
+  bind_rows() 
+  
+
+inv_info1 %>% pull(inversions) %>% sum(., na.rm = T)
+
+
+#inv_info1$mean_midpoint %>% shapiro.test()
+
+inv_info2 <- 
+  inv_info1 %>%
+  ungroup %>% 
+  group_by(phylum, organism_name) %>%
+  summarize(
+    mean_mean_midpoint = mean(mean_midpoint),
+    mean_inv_count = mean(inversions),
+    total_inversions = sum(inversions)
+  ) %>% 
+  ungroup
+
+
+midpoint_means <- 
+  (
+    inv_info2 %>% 
+      filter(!is.na(mean_mean_midpoint)) %>% 
+      pull(mean_mean_midpoint)
+    ) -0.5
+(inv_info2 %>% filter(!is.na(mean_mean_midpoint)) %>% pull(mean_mean_midpoint)) %>% mean -0.5
+
+(inv_info2 %>% filter(!is.na(mean_mean_midpoint)) %>% pull(mean_mean_midpoint)) %>%
+  t.test(mu = 0.5, alternative = "two.sided")
+boot_t
+
+
+tibble(
+  mm = midpoint_means,
+  mm_high = mm<=0.1,
+  mm_low = mm>=-0.1
+) %>% filter(mm_high &mm_low)
+
+  density %>% plot
+
+
+inv_summary <- 
+  full_join(
+    as_tibble(cluster_info),
+    inv_info2, 
+    by = c("organism_name", "phylum")
+  ) %>%
+  mutate(
+    clust2 = 
+      ifelse(
+        (is.na(clust) | !is.na(mean_mean_midpoint) | clust==1),
+        clust,
+        NA
+        )
+  ) %>%
+  arrange(desc(clust2)) 
+
+inv_summary %>%
+  filter(!is.na(clust2)) %>% View
+
+inv_summary %>% pull(clust2) %>% mean(na.rm = T) ## 8
+
+inv_summary %>% pull(mean_inv_count) %>% mean(na.rm = T) ## 3
+
+plot(inv_summary$mean_inv_count, inv_summary$mean_kmer)
+
+inv_summary %>% filter(!is.na(clust2)) %>% pull(clust2) %>% density %>% plot
+# weirdos <-
+#   as_tibble(cluster_info)$organism_name[
+#   !( as_tibble(cluster_info)$organism_name %in% inv_info2$organism_name)
+#   ]
+# cluster_info %>% filter(organism_name %in% weirdos)
+
+
+
+ncbi_table %>% count(species) %>% filter(n>=10)
+
+
+ncbi_table %>% count(species2) %>% filter(n>=10) %>% 
+  filter(
+    (species2 %in% (ncbi_table %>% count(species) %>% filter(n>=10) %>% pull(species)))
+    )
+
+xx1 <- 
+  ncbi_table %>% dplyr::count(species2) %>% filter(n>=10) %>% pull(species2)
+xx2 <- 
+  ncbi_table %>% dplyr::count(species) %>% 
+  filter(n>=10) %>% pull(species) %>% gsub(" ", "_", .)
+  
+xx1[!(xx1 %in% xx2)]
+
+
+
+```
+
+Or use the most up to date dataset 
+```{r}
+# The complete refseq and genobank genomes that have annotated taxonomies
+# using NCBI's new_taxdump file.
+# the data dowloaded and used are stored in "db"
+
+ncbi_table <- 
+  get_ncbi_table(db_dir = "db") %>%
+  mutate(species2 = sub(" ", "_", species)) %>% 
+  dplyr::count(species2) %>% 
+  filter(n>=10)
+
+```
+
+b) Filering the NCBI data
+```{r}
+ncbi_table_clade_count <- 
+  ncbi_table %>% 
+  add_count(species, name = "spec_count") %>%
+  filter(spec_count>=10) %>%
+  group_by(p2, species) %>%
+  summarise(spec_count = n(), .groups="keep") %>%
+  ungroup %>%
+  mutate(genus = sub("([A-Za-z]+).*", "\\1", species)) %>%
+  group_by(p2, genus) %>%
+  mutate(genus_count = sum(spec_count)) %>%
+  arrange(desc(genus_count), desc(spec_count))
+
+
+
+# ncbi_table %>% 
+#   count(species) %>%
+#   filter(n>=10) %>% View
+
+```
+
+
+2. Identifying inversions within species groups
+For example, Escherichia fergusonii (41 complete accessions)
+
+a) Generate a list of directories
+```{r}
+## Each species will require 8 different directories
+## These functions assign variable names and create the directories
+ 
+species_name <-
+  "Mycobacterium_tuberculosis"
+
+species_name <-
+  "Bordetella_holmesii"
+
+species_name <-
+  "Rhizobium_leguminosarum"
+
+# species_name <- 
+#   "Escherichia_fergusonii"
+
+genus_name <- 
+  strsplit(species_name, "_")[[1]][1]
+
+
+species_variable_names <-
+  c(
+    "sync_dir", "gff_dir", "identity_dir", 
+    "nucmer_dir", "r_vars_dir", "results_dir", 
+    "repeats_dir", "invs_dir"
+  )
+
+species_dirs <- 
+  gsub("_dir", "", species_variable_names)
+
+for (var_name in species_variable_names){
+  dir_name <- 
+    gsub("_dir", "", var_name)
+  full_dir_name <- 
+    sprintf("%s/%s/%s", dir_name, genus_name, species_name)
+  
+  assign(
+    var_name, 
+    full_dir_name
+    )
+  if (!dir.exists(full_dir_name)){dir.create(full_dir_name, recursive = T)}
+}
+```
+
+b) Filter the NCBI table for the specific species
+```{r}
+## filter the larger table
+species_table <- 
+  ncbi_table %>%
+  filter(species== sub("_", " ", species_name))
+
+## Get additional information from the assembly report
+report_details <-
+    get_report_table(species_table) %>%
+      mutate(
+          len = as.numeric(len),
+          accession = make.unique(accession)
+          ) %>% 
+    distinct %>%
+  dplyr::select(-c(submitter))
+
+# report_details <- 
+#   fread(
+#     "../mictools/results2/Gamma/Salmonella_enterica/report_summary.csv"
+#   )
+
+## Filter for contigs 
+ if (nrow(report_details)>nrow(species_table)){
+    report_details <- 
+      report_details %>%
+      group_by(asm_name) %>%
+      filter(!is.na(len)) %>%
+      filter(len == max(len, na.rm = T)) %>% ungroup()
+  }
+  
+report_details <- 
+  report_details %>% #pull(len) %>% density %>% plot 
+  filter(len < mean(len)+1e6 & len > mean(len)-1e6) 
+
+## join the report table with the filtered table
+full_species_table <-   
+      left_join(report_details, species_table, by = "asm_name") %>%
+      mutate(len = as.numeric(len)) %>%
+      filter(!duplicated(asm_name)) %>%
+  dplyr::select(
+    -c(
+      submitter, refseq_category, s, 
+      gbrs_paired_asm, paired_asm_comp, species_taxid
+      )
+    )
+```
+
+
+c) "Synchronize" each circular assembly to begin at dnaA gene
+```{r}
+## First download the full list of GFFs
+gff_table <- 
+  download_gff(full_species_table, gff_dir)
+
+gffs_available <- 
+  pull(gff_table, gff_exists) %>% sum
+
+sprintf(
+  "%i of %i GFF records downloaded",
+  gffs_available, nrow(gff_table)
+)
+
+## Synchronize genomes using their dnaA annotations from the GFF file
+sync_report <-
+    sync_with_gff(
+        full_species_table,
+        sync_dir, 
+        gff_dir
+        )
+ synced_table <- 
+      tibble(
+          Identified_genomes = nrow(full_species_table),
+          Synced_genomes = length(list.files(sync_dir))
+      )
+ ## get the list of sequence accessions
+ accession_list <- 
+      list.files(sync_dir) %>%
+      sub(".txt", "", .)
+ 
+ 
+ ## Repetitive sequnece information
+possible_kmers <-
+  pbmclapply(
+    accession_list,
+    function(x){
+      #for (x in accession_list){
+      filter(full_species_table, accession == x) %>%
+        dplyr::select(accession, len) %>%
+        mutate(
+          kmers_31 =
+            kmer_counts(g_name = x, repeats_dir, sync_dir),
+          possible_31_mers =
+            len-31+1,
+          kmer_prop =
+            kmers_31/possible_31_mers
+        )
+      }, mc.cores = 6
+    ) %>%
+  bind_rows %>%
+  arrange(kmer_prop) %>%
+  mutate(kmer_perc = 100*kmer_prop)
+
+report_summary <- 
+    left_join(report_details, possible_kmers[,c(1,6)], by = "accession") 
+ 
+
+ 
+```
+
+
+d) Get nucleotide similarity of pairwise comparisons using mash
+
+```{r}
+if (!
+    file.exists(
+      sprintf(
+        "%s/%s_%s_mash.txt", identity_dir, genus_name, species_name
+        )
+      )
+    ){
+  mash_bash <- 
+    mash_commands(genus_name, species_name, identity_dir, sync_dir)
+  system(mash_bash[1], ignore.stderr = T)
+  system(mash_bash[2])
+}
+
+
+
+## get the genome with the most closest relatives
+mash_tib <-
+    identity_sld(
+      identity_dir, genus_name, species_name, report_details, filetype = "mash", 
+      sync_dir = sync_dir
+      )
+most_related <- 
+  (mash_tib %>% 
+  mutate(ref = as.character(ref)) %>% 
+  group_by(ref) %>% 
+  summarise(mean_id = mean(identity_sld), .groups = "keep") %>%
+  arrange(desc(mean_id)) %>%
+  pull(ref))[1]
+```
+
+e) Clustering genomes by colinearity
+This step saves all inversion midpoints alignment tables with breakpoints
+```{r}
+cluster_file <- 
+    sprintf("%s/clustering_results.rds", r_vars_dir)
+if (file.exists(cluster_file)){
+      clustered <- 
+        readRDS(cluster_file)
+    } else {
+      clustered <- 
+        Cluster_Genomes(
+          ref = most_related, 
+          genome_vector = accession_list, 
+          report_details = report_details,
+          nucmer_dir = nucmer_dir, 
+          r_backup = r_vars_dir
+          )
+    }
+saveRDS(clustered, cluster_file)
+cluster_tib <-
+      suppressWarnings(
+      get_cluster_table(clustered, mash_tib, sync_dir, nucmer_dir) 
+      )
+
+ cluster_count <- 
+      cluster_tib %>% 
+      filter(clust !="LOC") %>% pull(clust) %>% unique %>% length
+  
+    clust_identity <- 
+      suppressWarnings(
+        inner_join(
+          mash_tib,
+          (cluster_tib[,c(1:2)] %>% `colnames<-`(c("ref", "ref_clust"))),
+          by = "ref"
+        ) %>%
+        inner_join(
+          ., 
+          (cluster_tib[,c(1:2)] %>% `colnames<-`(c("qry", "qry_clust"))), 
+          by = "qry"
+        ) %>%
+      mutate(
+        ref_clust = 
+          factor(
+            ref_clust, 
+            levels = 
+              LETTERS702[1:(cluster_count)]
+            ),
+        qry_clust = 
+          factor(
+            qry_clust, 
+            levels = levels(ref_clust)
+            )
+      ) %>%
+       arrange(
+          match(ref_clust, c(LETTERS702, "LOC")), 
+          match(qry_clust,  c(LETTERS702, "LOC"))
+        )
+      )
+    
+    ## within vs outside clust identity
+    # clust_identity_within <- 
+    #   clust_identity %>%
+    #   filter(
+    #     ref_clust !="LOC", 
+    #     qry_clust !="LOC",
+    #     ref != qry
+    #     ) %>%
+    #   group_by(ref_clust, qry_clust) %>%
+    #   summarise(mean_sld = mean(identity_sld), comparisons = n())
+  clust_identity_diff <- 
+      clust_identity %>%
+      filter(
+        ref_clust != qry_clust, 
+        ref_clust !="LOC", 
+        qry_clust !="LOC"
+        ) %>%
+      group_by(ref_clust, qry_clust) %>%
+      filter(identity_sld==max(identity_sld)) %>% 
+      mutate(
+        clusts = 
+          paste(
+            sort(
+              c(as.character(ref_clust)[1], as.character(qry_clust)[1])
+              ), 
+            collapse = ""
+            )
+      ) %>%
+      ungroup %>%
+      group_by(clusts) %>%
+      filter(identity_sld==max(identity_sld)) %>% 
+      arrange(clusts) %>% 
+      filter(!duplicated(clusts)) %>%
+       arrange(
+        match(ref_clust, c(LETTERS702, "LOC")), 
+        match(qry_clust,  c(LETTERS702, "LOC"))
+      )
+  write_csv(
+    clust_identity_diff, 
+    sprintf("%s/clust_identity_diff.csv",results_dir)
+    )
+  ### comparison tables between high identity representatives of clusts
+  delta_tibbles <-
+     pbmclapply(
+       1:nrow(clust_identity_diff),
+       function(i){
+         #for (i in 1:nrow(clust_identity_diff)){
+         (list.files(
+             sprintf("%s/ava", nucmer_dir),
+             full.names = T
+             ) %>%
+             grep(
+               pattern =
+                 (pull(clust_identity_diff, ref)[i]), 
+               value = T
+               ) %>%
+             grep(
+               pattern =
+                 (pull(clust_identity_diff, qry)[i]), 
+               value = T
+               ))[1] %>%
+           read_delta 
+       }
+     )
+all_midpoints <-
+     pbmclapply(
+       delta_tibbles,
+       function(x){
+         tibble(
+           ref = pull(x, rid)[1],
+           qry = pull(x, qid)[1],
+           midpoint =
+             delta_midpoints(x) %>% 
+             pull(mean_prop)# %>%
+             #mean
+         )
+         }, mc.cores = 6
+       ) %>%
+     bind_rows() %>%
+     add_count(midpoint, name = "mpc") %>%
+     mutate(
+       mpc_prop = mpc/sum(mpc)
+       )
+
+inv_tib_long <- 
+    lapply(
+         1:nrow(clust_identity_diff),
+         function(i){
+           delta_invs <- 
+             delta_tibbles[[i]] %>%
+             filter_delta() %>%
+             filter(meanlen >5e4) %>%
+             mutate(inv_cs = rleid(strand)) %>%
+             filter(
+              strand =="-",
+              !duplicated(inv_cs)
+               ) %>% 
+             nrow
+           out_tib <- 
+             clust_identity_diff[i,] %>% 
+             ungroup %>% 
+             dplyr::select(ref_clust, qry_clust) %>%
+             mutate(inversions = delta_invs)
+           }
+         ) %>%
+    bind_rows %>% 
+    bind_rows(
+      ., 
+      tibble(
+        ref_clust =  .$qry_clust,
+        qry_clust = .$ref_clust,
+        inversions = .$inversions
+      )
+    ) %>%
+    mutate(
+      inversions = 
+        ifelse(
+          ref_clust==qry_clust,
+          0,
+          ifelse(
+            inversions==0,
+            1,
+            inversions
+            )
+          )
+      )
+  inv_tib_wide <- 
+    inv_tib_long %>%
+    spread(key = qry_clust, value = inversions) %>%
+    replace(is.na(.), 0)
+  
+write_csv(inv_tib_wide, sprintf("%s/inversion_table.csv", results_dir))
+report_summary <- 
+    left_join(cluster_tib, report_summary, by = "accession") 
+
+write_csv(report_summary, sprintf("%s/report_summary.csv", results_dir))
+
+```
+
+
+Identification of high identity breakpoints
+### Bordetella homesii
+
+```{r}
+delta_tibbles <-
+     pbmclapply(
+       1:nrow(clust_identity_diff),
+       function(i){
+         #for (i in 1:nrow(clust_identity_diff)){
+         (list.files(
+             sprintf("%s/ava", nucmer_dir),
+             full.names = T
+             ) %>%
+             grep(
+               pattern =
+                 (pull(clust_identity_diff, ref)[i]), 
+               value = T
+               ) %>%
+             grep(
+               pattern =
+                 (pull(clust_identity_diff, qry)[i]), 
+               value = T
+               ))[1] %>%
+           read_delta 
+       }
+     )
+  
+  
+  ggarrange(
+    delta_tibbles[[1]] %>% plot_delta5(),
+    delta_tibbles[[5]] %>% plot_delta5(),
+    delta_tibbles[[2]] %>% plot_delta5(),
+    delta_tibbles[[6]] %>% plot_delta5(),
+    delta_tibbles[[3]] %>% plot_delta5(),
+    delta_tibbles[[4]] %>% plot_delta5(),
+          ncol = 2, nrow = 3)
+  delta_tibbles[[1]] %>% plot_delta5()
+    delta_tibbles[[2]] %>% plot_delta5()
+    delta_tibbles[[3]] %>% plot_delta5()
+    delta_tibbles[[4]] %>% plot_delta5()
+    delta_tibbles[[6]] %>% plot_delta5()
+    delta_tibbles[[5]] %>% plot_delta5()
+    
+    delta_tibbles[[1]]$rid[1]
+    delta_tibbles[[2]]$qid[1]
+
+    
+    cid2 <- 
+      clust_identity %>%
+      filter(
+        ref_clust != qry_clust, 
+        ref_clust !="LOC", 
+        qry_clust !="LOC"
+        ) %>%
+      group_by(ref_clust, qry_clust, ref) %>%
+      filter(identity_sld==max(identity_sld)) %>% 
+      mutate(
+        clusts = 
+          paste(
+            sort(
+              c(as.character(ref_clust)[1], as.character(qry_clust)[1])
+              ), 
+            collapse = ""
+            )
+      ) %>% 
+      filter(
+        ref_clust=="A" |
+          qry_clust=="A"
+      ) %>%
+      ungroup %>%
+      group_by(ref, qry, ref_clust, qry_clust) %>%
+      summarise(
+        mean_id = mean(identity_sld)
+      ) %>% ungroup() %>% 
+      group_by(ref) %>%
+      mutate(
+        smi = sum(mean_id)
+      )  %>%
+      arrange(desc(smi)) %>%
+      ungroup %>%
+      filter(smi==max(smi))
+    if (
+      !dir.exists(
+        sprintf("%s/%s_va", invs_dir, cid2$ref[1])
+        )
+    ){
+      dir.create(
+        sprintf("%s/%s_va", invs_dir, cid2$ref[1])
+      )
+      }
+    
+    
+      all_vs_all(
+        cid2[,1:2], 
+        sync_dir, 
+        nucmer_dir = sprintf("%s/ava", invs_dir)
+      )
+    
+    delta_tibbles <-
+     pbmclapply(
+       1:nrow(cid2),
+       function(i){
+         #for (i in 1:nrow(cid2)){
+         (list.files(
+             sprintf("%s/ava", invs_dir),
+             full.names = T
+             ) %>%
+             grep(
+               pattern =
+                 (pull(cid2, ref)[i]), 
+               value = T
+               ) %>%
+             grep(
+               pattern =
+                 (pull(cid2, qry)[i]), 
+               value = T
+               ))[1] %>%
+           read_delta 
+       }
+     )
+    
+delta_tibbles[[1]] %>% plot_delta
+
+
+```
+
+
+```{r}
+### getting repetitve breakpoint sequence labels
+
+ref_inv_bp_start <- 
+  lapply(
+      1:length(delta_tibbles),
+      function(i){
+        tibble(
+          bp1 = 
+            delta_tibbles[[i]] %>% 
+            filter_delta %>% filter(strand=="-") %>% pull(rs),
+          bp2 = 
+            delta_tibbles[[i]]%>% filter_delta %>% dplyr::slice(1) %>% pull(re)
+        ) %>% 
+          mutate(len = bp2-bp1+1)
+      }
+    ) %>% bind_rows
+
+
+```
+
+
+
+```{r}
+report_details <- 
+  fread(
+    "../mictools/results2/Gamma/Salmonella_enterica/report_summary.csv"
+  )
+
+mash_tib <- 
+  fread(
+    "../mictools/identity/Gamma/Salmonella_enterica/Salmonella_enterica_mash.txt"
+    )
+
+mash_tib <-
+    identity_sld(
+      identity_dir = "../mictools/identity/Gamma/Salmonella_enterica/",
+      genus_name, species_name, report_details, filetype = "mash", 
+      sync_dir = "../mictools/db/synced/Gamma/Salmonella_enterica"
+      )
+clustered <- 
+  readRDS("../mictools/r_vars/Gamma/Salmonella_enterica/clustering_results.rds")
+cluster_tib_salmonella <-
+      suppressWarnings(
+        get_cluster_table(
+          clustered, id_sld, 
+          sync_dir = "../mictools/db/synced/Gamma/Salmonella_enterica", 
+          nucmer_dir = "../mictools/nucmer/Gamma/Salmonella_enterica"
+          ) 
+      )
+salmonella_report <- 
+  report_details %>%
+  filter(!grepl(x = accession, pattern = "ANONYMOUS|contig")) %>%
+  group_by(clust) %>%
+  dplyr::slice(1) %>% 
+  filter(
+    clust %in% c("A", "B", "F", "G")
+  )
+acc_matrix <- 
+  tibble(
+    ref = 
+      salmonella_report$accession[1],
+    qry = 
+      salmonella_report$accession[-1],
+    clust_q = 
+      salmonella_report$clust[-1]
+  )
+
+all_vs_all(
+        acc_matrix[,1:2], 
+        "../mictools/db/synced/Gamma/Salmonella_enterica", 
+        nucmer_dir = sprintf("%s/ava", invs_dir)
+      )
+
+
+delta_tibbles <-
+     pbmclapply(
+       1:nrow(acc_matrix),
+       function(i){
+         #for (i in 1:nrow(cid2)){
+         (list.files(
+             sprintf("%s/ava", invs_dir),
+             full.names = T
+             ) %>%
+             grep(
+               pattern =
+                 (pull(acc_matrix, ref)[i]), 
+               value = T
+               ) %>%
+             grep(
+               pattern =
+                 (pull(acc_matrix, qry)[i]), 
+               value = T
+               ))[1] %>%
+           read_delta 
+       }
+     )
+
+ggarrange(
+    delta_tibbles[[1]] %>% filter_delta %>% plot_delta5(),
+    delta_tibbles[[2]] %>% filter_delta %>% plot_delta5(),
+    delta_tibbles[[3]] %>% filter_delta %>% plot_delta5(),
+          ncol = 1, nrow = 3)
+```
+
+```{r}
+ref_inv_bp_start <- 
+  lapply(
+      1:length(delta_tibbles),
+      function(i){
+        tibble(
+          bp1 = 
+            delta_tibbles[[i]] %>% 
+            filter_delta %>% filter(strand=="-") %>% pull(rs),
+          bp2 = 
+            delta_tibbles[[i]]%>% filter_delta %>% dplyr::slice(1) %>% pull(re)
+        ) %>% 
+          mutate(len = bp2-bp1+1)
+      }
+    ) %>% bind_rows
+
+ref_inv_bp_end <- 
+  lapply(
+      1:length(delta_tibbles),
+      function(i){
+        tibble(
+          bp1 =
+            delta_tibbles[[i]]%>% filter_delta %>% dplyr::slice(3) %>% pull(rs),
+          bp2 = 
+            delta_tibbles[[i]] %>% 
+            filter_delta %>% filter(strand=="-") %>% pull(re)
+        ) %>% 
+          mutate(len = bp2-bp1+1)
+      }
+    ) %>% bind_rows
+```
+
+
+
+
+Bordetella homesii
+#1
+
+
+
+
+```{r}
+## all reference breakpoints
+ref_inv_bp_start <- 
+  lapply(
+      1:length(delta_tibbles),
+      function(i){
+        tibble(
+          bp1 = 
+            delta_tibbles[[i]] %>% 
+            filter_delta %>% filter(strand=="-") %>% pull(rs),
+          bp2 = 
+            delta_tibbles[[i]]%>% filter_delta %>% dplyr::slice(1) %>% pull(re)
+        ) %>% 
+          mutate(len = bp2-bp1+1)
+      }
+    ) %>% bind_rows
+
+ref_inv_bp_end <- 
+  lapply(
+      1:length(delta_tibbles),
+      function(i){
+        tibble(
+          bp1 =
+            delta_tibbles[[i]]%>% filter_delta %>% dplyr::slice(3) %>% pull(rs),
+          bp2 = 
+            delta_tibbles[[i]] %>% 
+            filter_delta %>% filter(strand=="-") %>% pull(re)
+        ) %>% 
+          mutate(len = bp2-bp1+1)
+      }
+    ) %>% bind_rows
+
+ref_inv_bp_start_seqs <- 
+  lapply(
+    1:nrow(ref_inv_bp_start),
+    function(i){
+      seq_out <- 
+        subseq(
+          readDNAStringSet(
+            sprintf(
+              "%s/%s.txt", 
+              sync_dir, delta_tibbles[[1]]$rid[1]
+              )
+            ), 
+          ref_inv_bp_start$bp1[i], ref_inv_bp_start$bp2[i]
+          ) 
+        writeXStringSet(
+          seq_out, 
+          sprintf(
+            "%s/%s_break_seq_bp%s.fasta",
+            ref_inv_dir,
+            delta_tibbles[[1]]$rid[1],
+            i
+            )
+          )
+        return(seq_out)
+      }
+    )
+
+ref_inv_bp_end_seqs <- 
+  lapply(
+    1:nrow(ref_inv_bp_end),
+    function(i){
+      seq_out <- 
+      subseq(
+        readDNAStringSet(
+          sprintf(
+            "%s/%s.txt", 
+            sync_dir, delta_tibbles[[1]]$rid[1]
+            )
+          ), 
+        ref_inv_bp_end$bp1[i], ref_inv_bp_end$bp2[i]
+        ) 
+        writeXStringSet(
+          seq_out, 
+          sprintf(
+            "%s/%s_break_seq_bp%s.fasta",
+            ref_inv_dir,
+            delta_tibbles[[1]]$rid[1],
+            i
+            )
+          )
+        return(seq_out)
+      }
+    )
+
+
+lapply(
+  1:6,
+  function(i){
+    x1 <- 
+      pairwiseAlignment(ref_inv_bp_start_seqs[[i]][1],
+                      ref_inv_bp_end_seqs[[i]][1]) %>% pid
+    x2 <- 
+    pairwiseAlignment(ref_inv_bp_start_seqs[[i]][1],
+                      reverseComplement(ref_inv_bp_end_seqs[[i]][1])) %>% pid
+    return(c(x1, x2))
+  }
+  )
+
+
+
+nucmer_maxmatch_commmand( 
+  ref = 
+    sprintf(
+      "%s/%s.txt",
+      sync_dir,
+      delta_tibbles[[1]]$rid[1]
+    ),
+  qry = 
+    sprintf(
+    "%s/%s_break_seq.fasta",
+    ref_inv_dir,
+    delta_tibbles[[1]]$rid[1]
+  ),
+  outfile =  
+    sprintf(
+      "%s/%s_break_v_ref",
+      ref_inv_dir, 
+      delta_tibbles[[1]]$rid[1]
+    )
+) %>% system
+
+## all matches
+
+ref_inv_dir2 <- 
+  sprintf(
+    "%s/start",
+    ref_inv_dir
+    )
+if (!dir.exists(ref_inv_dir2)){dir.create(ref_inv_dir2)}
+
+test_circles <- 
+  list()
+circle_coords_ref <- list()
+# breakpoint_ref_comparisons <- 
+#   lapply(
+#       1:nrow(ref_inv_bp_end),
+      # function(i){
+for (i in 1:nrow(ref_inv_bp_end)){
+        seq_out <- 
+            sprintf(
+              "%s/%s_break_seq_bp%s.fasta",
+              ref_inv_dir,
+              delta_tibbles[[1]]$rid[1],
+              i
+              )
+        delta_out <- 
+          sprintf(
+              "%s/%s_break_v_ref_%s",
+              ref_inv_dir2, 
+              delta_tibbles[[1]]$rid[1],
+              i
+            )
+        
+        nucmer_maxmatch_commmand( 
+          ref = 
+            sprintf(
+              "%s/%s.txt",
+              sync_dir,
+              delta_tibbles[[1]]$rid[1]
+            ),
+          qry = 
+            seq_out,
+          outfile =  
+            delta_out
+        ) %>% system
+        
+        repeat_match_coords_ref <- 
+          read_delta(
+            sprintf(
+              "%s.delta",
+              delta_out
+            )
+          )[, c(1:10)] %>%
+          mutate(
+            rmid = (rs+re)/2,
+            ref_p =
+              round(rmid/rlen, 2),
+            ref_p2 = 
+              round(abs(ref_p-1), 2),
+            idx = 1:n()
+              )
+        
+        circle_coords_ref[[i]] <- 
+            tibble(
+              start = repeat_match_coords_ref$rs,
+              end = repeat_match_coords_ref$re,
+              width = end-start+1,
+              id = "repeat"
+            ) %>%
+            bind_rows(
+              IRanges(
+                repeat_match_coords_ref$rs,
+                repeat_match_coords_ref$re
+                ) %>% 
+                gaps(start = 1, end = repeat_match_coords_ref$rlen[1]) %>% 
+                as.data.frame() %>%
+                mutate(
+                  id = 
+                    "chromosome"
+                  ) %>%
+                as_tibble
+            ) %>% 
+            arrange(start) %>%
+            mutate(
+              id = 
+                factor(
+                  ifelse(
+                    start ==
+                      (delta_tibbles[[i]]%>% filter_delta)$rs[2] | 
+                      end==
+                      (delta_tibbles[[i]]%>% filter_delta)$re[2],
+                    "breakpoint",
+                    id
+                    )
+                  ),
+              s2 = 
+                ifelse(
+                  (id=="repeat" | id== "breakpoint"),
+                  start-5000,
+                  ifelse(
+                    start==1,
+                    1,
+                    start+5000
+                  )
+                ),
+              e2 = 
+                ifelse(
+                  (id=="repeat" | id== "breakpoint"),
+                  end+5000,
+                  ifelse(
+                    end==max(end),
+                    max(end),
+                    end-5000
+                  )
+                ),
+              x1 = 
+                ifelse(
+                  id=="chromosome",
+                  3.75,
+                  ifelse(
+                    id=="repeat",
+                    3.5,
+                    3
+                  )
+                ),
+              x2 = 
+                ifelse(
+                  id=="chromosome",
+                  4,
+                  ifelse(
+                    id=="repeat",
+                    4.05,
+                    4.1
+                  )
+                )
+              )
+        test_circles[[i]] <- 
+          circle_coords_ref[[i]]  %>% 
+          ggplot(
+            aes(ymax=e2, ymin=s2, xmax=4, xmin=x1, fill=id)
+            ) + 
+          geom_rect(colour = "black") +
+          scale_fill_manual(values = (brewer.pal(6, "Set2"))[c(2,3,6)]) +
+          coord_polar(theta="y", start = 0)+ 
+          theme_void(base_rect_size = 1) +  
+          xlim(c(-10, 4.1)) + 
+          #(scale_fill_brewer(palette = "Dark2")) +
+          guides(fill="none") +
+          geom_text(aes(x=3.5, y=-0, label = "|"), size = 5) +
+          geom_text(aes(x=2.5, y=-10, label = "dnaA"), size = 10)
+        
+        
+        print(i)
+        
+}
+  #       return(repeat_match_coords_ref)
+  #     }
+  # )
+
+ggarrange(
+    test_circles[[1]], 
+    test_circles[[5]],
+    test_circles[[2]],
+    test_circles[[6]],
+    test_circles[[3]],
+    test_circles[[4]],
+          ncol = 2, nrow = 3)
+
+delta_tibbles[[6]] %>% plot_delta5
+delta_tibbles[[2]] %>% plot_delta5
+
+test_circles[[6]]
+test_circles %>% bind_rows()
+
+big_circ <- 
+  circle_coords_ref %>%
+  bind_rows
+
+big_circ_repeats <- 
+  IRanges(
+    start = 
+      big_circ %>% filter(id =="repeat") %>% pull(s2),
+    end = 
+      big_circ %>% filter(id =="repeat") %>% pull(e2)
+  )
+
+big_circ_breakpoint <- 
+  IRanges(
+    start = 
+      big_circ %>% filter(id =="breakpoint") %>% pull(s2),
+    end = 
+      big_circ %>% filter(id =="breakpoint") %>% pull(e2)
+  )
+
+
+big_circ_chrom <- 
+  gaps(
+    c(big_circ_repeats, big_circ_breakpoint),
+    start = 1,  
+    end = delta_tibbles[[1]]$rlen[1]
+  )
+
+big_circ2 <- 
+  big_circ_repeats %>% 
+  as.data.frame() %>% 
+  as_tibble %>%
+  mutate(id = "repeat") %>%
+  unique %>%
+  bind_rows(
+    ., 
+    big_circ_breakpoint %>% 
+    as.data.frame() %>% 
+    as_tibble %>%
+    mutate(id = "breakpoint")
+  ) %>%
+  bind_rows(
+    ., 
+    big_circ_chrom %>% 
+    as.data.frame() %>% 
+    as_tibble %>%
+    mutate(id = "chromosome")
+  ) %>% 
+  arrange(start) %>%
+  mutate(
+    x1 = 
+    ifelse(
+      id=="chromosome",
+      3.75,
+      ifelse(
+        id=="repeat",
+        3.5,
+        3
+      )
+    ),
+  x2 = 
+    ifelse(
+      id=="chromosome",
+      4,
+      ifelse(
+        id=="repeat",
+        4.05,
+        4.1
+      )
+    ),
+  xss = 
+     ifelse(
+        id=="chromosome",
+        3.75,
+        3.5
+     )
+  ) 
+
+
+
+
+
+big_circ3 <-
+  big_circ2 %>% 
+  filter(
+    !(start<lag(end) & lag(id)=="breakpoint" & id=="repeat")
+  ) %>%
+  filter(
+    !(start<lag(end) & lead(id)=="breakpoint" & id=="repeat")
+  ) %>%
+  filter(
+    !(end>lead(start) & lead(id)=="breakpoint" & id=="repeat")
+  ) %>%
+  filter(
+    !(end>lead(start) & lag(id)=="breakpoint" & id=="repeat")
+  ) %>%
+  filter(
+    !(lag(end)>start & lag(id)=="breakpoint" & id=="repeat")
+  ) %>%
+  filter(
+    !(lag(end)>start & lead(id)=="breakpoint" & id=="repeat")
+  )
+bc3_chrom <- 
+  IRanges(
+    start = 
+      big_circ3$start,
+    end = 
+      big_circ3$end
+  ) %>% 
+    gaps(
+      .,
+      start = 1,  
+      end = delta_tibbles[[1]]$rlen[1] 
+      ) %>% as.data.frame() %>%
+  mutate(
+    id = "chromosome", x1 = 3.75, x2 = 4, xss = 3.75
+  )
+  
+    
+big_circ4 <- 
+  bind_rows(
+    big_circ3,
+    bc3_chrom
+  ) %>% arrange(start) %>%
+  mutate(
+    id2 = 
+      ifelse(
+        id=="breakpoint",
+        "repeat",
+        id
+        )
+      )
+
+
+
+circle_coords_ref %>%
+  bind_rows %>%
+  unique %>%
+  ggplot(
+    aes(ymax=e2, ymin=s2, xmax=x2, xmin=x1, fill=id)
+    ) +
+  geom_rect(colour = "black") +
+  scale_fill_manual(values = (brewer.pal(6, "Set2"))[c(2,3,6)]) +
+  coord_polar(theta="y", start = 0)+ 
+  theme_void(base_rect_size = 1) +  
+  xlim(c(-10, 4.2)) + 
+  #(scale_fill_brewer(palette = "Dark2")) +
+  guides(fill="none") +
+  geom_text(aes(x=3.5, y=-0, label = "|"), size = 5) +
+  geom_text(aes(x=2.5, y=-10, label = "dnaA"), size = 10)
+
+big_circ4 %>%
+  ggplot(
+    aes(ymax=end, ymin=start, xmax=4, xmin=xss, fill=id2)
+    ) +
+  geom_rect() +
+  #scale_fill_manual(values = (brewer.pal(6, "Set2"))[c(2,3,6)]) +
+  scale_fill_manual(values = (brewer.pal(6, "Set2"))[c(3,2)]) +
+  coord_polar(theta="y", start = 0)+ 
+  theme_void(base_rect_size = 1) +  
+  xlim(c(-10, 4)) + 
+  #(scale_fill_brewer(palette = "Dark2")) +
+  guides(fill="none") +
+  geom_text(aes(x=3.5, y=0, label = "|"), size = 5) +
+  geom_text(aes(x=2.5, y=-10, label = "dnaA"), size = 10) 
+  #geom_vline(xintercept = 3.5, linetype = "longdash", color = "grey", alpha = 0.8)
+  #annotate("segment",x = 1, xend = -10,y = 0, yend = 0, colour = "black", size = 0.75, alpha = 0.3)
+
+
+repeat_match_coords_ref <- 
+  read_delta(
+    sprintf(
+      "%s/%s_break_v_ref.delta",
+      ref_inv_dir, 
+      delta_tibbles[[1]]$rid[1]
+    )
+  )[, c(1:10)] %>%
+  mutate(
+    rmid = (rs+re)/2,
+    ref_p =
+      round(rmid/rlen, 2),
+    ref_p2 = 
+      round(abs(ref_p-1), 2),
+    idx = 1:n()
+      )
+
+circle_coords_ref <- 
+  tibble(
+    start = repeat_match_coords_ref$rs,
+    end = repeat_match_coords_ref$re,
+    width = end-start+1,
+    id = "repeat"
+  ) %>%
+  bind_rows(
+    IRanges(
+      repeat_match_coords_ref$rs,
+      repeat_match_coords_ref$re
+      ) %>% 
+      gaps(start = 1, end = repeat_match_coords_ref$rlen[1]) %>% 
+      as.data.frame() %>%
+      mutate(
+        id = 
+          "chromosome"
+        ) %>%
+      as_tibble
+  ) %>% 
+  arrange(start) %>%
+  mutate(
+    id = 
+      factor(
+        ifelse(
+          start ==
+            (delta_tibbles[[1]]%>% filter_delta)$rs[2] | 
+            end==
+            (delta_tibbles[[1]]%>% filter_delta)$re[2],
+          "breakpoint",
+          id
+          )
+        ),
+    s2 = 
+      ifelse(
+        (id=="repeat" | id== "breakpoint"),
+        start-5000,
+        start
+      ),
+    e2 = 
+      ifelse(
+        (id=="repeat" | id== "breakpoint"),
+        end+5000,
+        end
+      )
+    )
+  
+circle_coords_ref %>% 
+  ggplot(
+    aes(ymax=e2, ymin=s2, xmax=4, xmin=3, fill=id)
+    ) + 
+  geom_rect(colour = "black") +
+  scale_fill_manual(values = (brewer.pal(6, "Set2"))[c(2,3,6)]) +
+  coord_polar(theta="y", start = 0)+ 
+  theme_void(base_rect_size = 1) +  
+  xlim(c(-10, 4)) + 
+  #(scale_fill_brewer(palette = "Dark2")) +
+  guides(fill="none") +
+  geom_text(aes(x=3, y=-0, label = "|"), size = 5) +
+  geom_text(aes(x=2, y=-10, label = "dnaA"), size = 10)
+  
+## which are the same
+
+pairwiseAlignment(
+  ref_inv_bp_start_seqs[[1]][[1]],
+  ref_inv_bp_start_seqs[[5]][[1]]
+) %>% pid(., type = "PID3")
+pairwiseAlignment(
+  ref_inv_bp_start_seqs[[4]][[1]],
+  ref_inv_bp_start_seqs[[6]][[1]]
+) %>% pid(., type = "PID3")
+
+pairwiseAlignment(
+  ref_inv_bp_start_seqs[[3]][[1]],
+  ref_inv_bp_start_seqs[[6]][[1]]
+) %>% pid(., type = "PID3")
+
+pairwiseAlignment(
+  ref_inv_bp_start_seqs[[1]][[1]],
+  ref_inv_bp_start_seqs[[3]][[1]]
+) %>% pid(., type = "PID3")
+pairwiseAlignment(
+  ref_inv_bp_start_seqs[[1]][[1]],
+  ref_inv_bp_start_seqs[[4]][[1]]
+) %>% pid(., type = "PID3")
+
+pairwiseAlignment(
+  ref_inv_bp_start_seqs[[1]][[1]],
+  ref_inv_bp_start_seqs[[6]][[1]]
+) %>% pid(., type = "PID3")
+pairwiseAlignment(
+  ref_inv_bp_start_seqs[[1]][[1]],
+  ref_inv_bp_start_seqs[[3]][[1]]
+) %>% pid(., type = "PID3")
+
+
+
+inv_ref_rs_1 <- 
+  delta_tibbles[[3]]%>% filter_delta %>% filter(strand=="-") %>% pull(rs)
+
+inv_ref_re_1 <- 
+  delta_tibbles[[3]]%>% filter_delta %>% dplyr::slice(1) %>% pull(re)
+
+inv_ref_rs_1 <- 
+  delta_tibbles[[1]]%>% filter_delta %>% filter(strand=="-") %>% pull(rs)
+
+inv_ref_re_1 <- 
+  delta_tibbles[[1]]%>% filter_delta %>% dplyr::slice(1) %>% pull(re)
+
+
+
+
+inv_qry_qs_1 <- 
+  delta_tibbles[[1]]%>% filter_delta %>% filter(strand=="-") %>% pull(qe)
+
+inv_qry_qe_1 <- 
+  delta_tibbles[[1]]%>% filter_delta %>% dplyr::slice(1) %>% pull(qe)
+
+ref_inv_dir <- 
+  sprintf(
+    "%s/%s",
+    invs_dir, 
+    delta_tibbles[[1]]$rid[1]
+  )
+if(!dir.exists(ref_inv_dir))(dir.create(ref_inv_dir))
+
+### Reference
+
+subseq(
+  readDNAStringSet(
+    sprintf(
+      "%s/%s.txt", 
+      sync_dir, delta_tibbles[[1]]$rid[1]
+      )
+    ), 
+  inv_ref_rs_1, inv_ref_re_1
+) %>% writeXStringSet(
+  ., 
+  sprintf(
+    "%s/%s_break_seq.fasta",
+    ref_inv_dir,
+    delta_tibbles[[1]]$rid[1]
+  )
+  )
+
+nucmer_maxmatch_commmand( 
+  ref = 
+    sprintf(
+      "%s/%s.txt",
+      sync_dir,
+      delta_tibbles[[1]]$rid[1]
+    ),
+  qry = 
+    sprintf(
+    "%s/%s_break_seq.fasta",
+    ref_inv_dir,
+    delta_tibbles[[1]]$rid[1]
+  ),
+  outfile =  
+    sprintf(
+      "%s/%s_break_v_ref",
+      ref_inv_dir, 
+      delta_tibbles[[1]]$rid[1]
+    )
+) %>% system
+
+repeat_match_coords_ref <- 
+  read_delta(
+    sprintf(
+      "%s/%s_break_v_ref.delta",
+      ref_inv_dir, 
+      delta_tibbles[[1]]$rid[1]
+    )
+  )[, c(1:10)] %>%
+  mutate(
+    rmid = (rs+re)/2,
+    ref_p =
+      round(rmid/rlen, 2),
+    ref_p2 = 
+      round(abs(ref_p-1), 2),
+    idx = 1:n()
+      )
+cm <-
+  matrix(nrow = 15, ncol = 15)
+
+for (i in 1:15){
+  for (j in 1:15){
+    cm[i,j] <-
+      repeat_match_coords_ref$ref_p[i] +
+      repeat_match_coords_ref$ref_p[j]
+  }
+}
+
+cm[lower.tri(cm, diag = T)]<- 0
+
+### Query
+subseq(
+  readDNAStringSet(
+    sprintf(
+      "%s/%s.txt", 
+      sync_dir, delta_tibbles[[1]]$qid[1]
+      )
+    ), 
+  inv_qry_qs_1, inv_qry_qe_1
+) %>% 
+  writeXStringSet(
+    ., 
+    sprintf(
+      "%s/%s_break_seq.fasta",
+      invs_dir, 
+      delta_tibbles[[1]]$qid[1]
+      )
+    )
+
+nucmer_maxmatch_commmand( 
+  ref = 
+    sprintf(
+      "%s/%s.txt",
+      sync_dir,
+      delta_tibbles[[1]]$qid[1]
+    ),
+  qry = 
+    sprintf(
+      "%s/%s_break_seq.fasta",
+      invs_dir, 
+      delta_tibbles[[1]]$qid[1]
+      ),
+  outfile =  
+    sprintf(
+      "%s/%s_break_v_qry",
+      invs_dir, 
+      delta_tibbles[[1]]$qid[1]
+    )
+) %>% system
+
+repeat_match_coords_qry <- 
+  read_delta(
+     sprintf(
+      "%s/%s_break_v_qry.delta",
+      invs_dir, 
+      delta_tibbles[[1]]$qid[1]
+    )
+  )[, c(1:10)] %>%
+  mutate(
+    rmid = (rs+re)/2,
+    ref_p =
+      rmid/rlen,
+    ref_p2 = 
+      abs(ref_p-1)
+      )
+
+
+
+
+## is the repeat the same?
+pairwiseAlignment(
+  readDNAStringSet(
+    sprintf(
+      "%s/%s_break_seq.fasta",
+      invs_dir,
+      delta_tibbles[[1]]$rid[1]
+    )
+    )[[1]],
+  readDNAStringSet(
+    sprintf(
+      "%s/%s_break_seq.fasta",
+      invs_dir, delta_tibbles[[1]]$qid[1]
+    )
+  )
+) %>% pid(., type = "PID4")
+
+### ref
+circle_coords_ref <- 
+  tibble(
+    start = repeat_match_coords_ref$rs,
+    end = repeat_match_coords_ref$re,
+    width = end-start+1,
+    id = "repeat"
+  ) %>%
+  bind_rows(
+    IRanges(
+      repeat_match_coords_ref$rs,
+      repeat_match_coords_ref$re
+      ) %>% 
+      gaps(start = 1, end = repeat_match_coords_ref$rlen[1]) %>% 
+      as.data.frame() %>%
+      mutate(
+        id = 
+          "chromosome"
+        ) %>%
+      as_tibble
+  ) %>% 
+  arrange(start) %>%
+  mutate(
+    id = 
+      factor(
+        ifelse(
+          start ==
+            (delta_tibbles[[1]]%>% filter_delta)$rs[2] | 
+            end==
+            (delta_tibbles[[1]]%>% filter_delta)$re[2],
+          "breakpoint",
+          id
+          )
+        ),
+    s2 = 
+      ifelse(
+        (id=="repeat" | id== "breakpoint"),
+        start-10000,
+        start
+      ),
+    e2 = 
+      ifelse(
+        (id=="repeat" | id== "breakpoint"),
+        end+10000,
+        end
+      )
+    )
+  
+circle_coords_ref %>% 
+  ggplot(
+    aes(ymax=e2, ymin=s2, xmax=4, xmin=3, fill=id)
+    ) + 
+  geom_rect(colour = "black") +
+  coord_polar(theta="y", start = 0)+ 
+  theme_void(base_rect_size = 1) +  
+  xlim(c(-10, 4)) + 
+  scale_fill_manual(values = (brewer.pal(6, "Set2"))[c(2,3,6)]) +
+  #(scale_fill_brewer(palette = "Dark2")) +
+  guides(fill="none") +
+  geom_text(aes(x=3, y=-0, label = "|"), size = 5) +
+  geom_text(aes(x=2, y=-10, label = "dnaA"), size = 10)
+
+
+### qry
+circle_coords_qry <- 
+  tibble(
+    start = repeat_match_coords_qry$rs,
+    end = repeat_match_coords_qry$re,
+    width = end-start+1,
+    id = "repeat"
+  ) %>%
+  bind_rows(
+    IRanges(
+      repeat_match_coords_qry$rs,
+      repeat_match_coords_qry$re
+      ) %>% 
+      gaps(start = 1, end = repeat_match_coords_qry$rlen[1]) %>% 
+      as.data.frame() %>%
+      mutate(
+        id = 
+          "chromosome"
+        ) %>%
+      as_tibble
+  ) %>% 
+  arrange(start) %>%
+  mutate(
+    id = 
+      factor(
+        ifelse(
+          start ==
+            (delta_tibbles[[1]]%>% filter_delta)$qe[2] | 
+            end==
+            (delta_tibbles[[1]]%>% filter_delta)$qs[2],
+          "breakpoint",
+          id
+          )
+        ),
+    s2 = 
+      ifelse(
+        (id=="repeat" | id== "breakpoint"),
+        start-10000,
+        start
+      ),
+    e2 = 
+      ifelse(
+        (id=="repeat" | id== "breakpoint"),
+        end+10000,
+        end
+      )
+    )
+  
+
+circle_coords_qry %>% 
+  ggplot(
+    aes(ymax=e2, ymin=s2, xmax=4, xmin=3, fill=id)
+    ) + 
+  geom_rect(colour = "black") +
+  coord_polar(theta="y", start = 0)+ 
+  theme_void(base_rect_size = 1) +  
+   xlim(c(-10, 4)) + 
+  scale_fill_manual(values = (brewer.pal(6, "Set2"))[c(2,3,6)])+
+  #(scale_fill_brewer(palette = "Dark2")) +
+  guides(fill="none")  +
+  geom_text(aes(x=3, y=-0, label = "|"), size = 5) +
+  geom_text(aes(x=2, y=-10, label = "dnaA"), size = 10)
+
+```
+
+#2
+```{r}
+inv_ref_rs_1 <- 
+  delta_tibbles[[1]]%>% filter_delta %>% filter(strand=="-") %>% pull(rs)
+
+inv_ref_re_1 <- 
+  delta_tibbles[[1]]%>% filter_delta %>% dplyr::slice(1) %>% pull(re)
+
+inv_qry_qs_1 <- 
+  delta_tibbles[[1]]%>% filter_delta %>% filter(strand=="-") %>% pull(qe)
+
+inv_qry_qe_1 <- 
+  delta_tibbles[[1]]%>% filter_delta %>% dplyr::slice(1) %>% pull(qe)
+
+### Reference
+subseq(
+  readDNAStringSet(
+    sprintf(
+      "%s/%s.txt", 
+      sync_dir, delta_tibbles[[1]]$rid[1]
+      )
+    ), 
+  inv_ref_rs_1, inv_ref_re_1
+) %>% writeXStringSet(
+  ., 
+  sprintf(
+    "%s/%s_break_seq.fasta",
+    invs_dir, 
+    delta_tibbles[[1]]$rid[1]
+  )
+  )
+
+nucmer_maxmatch_commmand( 
+  ref = 
+    sprintf(
+      "%s/%s.txt",
+      sync_dir,
+      delta_tibbles[[1]]$rid[1]
+    ),
+  qry = 
+    sprintf(
+      "%s/%s_break_seq.fasta",
+      invs_dir, 
+      delta_tibbles[[1]]$rid[1]
+      ),
+  outfile =  
+    sprintf(
+      "%s/%s_break_v_ref",
+      invs_dir, 
+      delta_tibbles[[1]]$rid[1]
+    )
+) %>% system
+
+repeat_match_coords_ref <- 
+  read_delta(
+    sprintf(
+      "%s/%s_break_v_ref.delta",
+      invs_dir, 
+      delta_tibbles[[1]]$rid[1]
+    )
+  )[, c(1:10)] %>%
+  mutate(
+    rmid = (rs+re)/2,
+    ref_p =
+      round(rmid/rlen, 2),
+    ref_p2 = 
+      round(abs(ref_p-1), 2),
+    idx = 1:n()
+      )
+cm <-
+  matrix(nrow = 15, ncol = 15)
+
+for (i in 1:15){
+  for (j in 1:15){
+    cm[i,j] <-
+      repeat_match_coords_ref$ref_p[i] +
+      repeat_match_coords_ref$ref_p[j]
+  }
+}
+
+cm[lower.tri(cm, diag = T)]<- 0
+
+### Query
+subseq(
+  readDNAStringSet(
+    sprintf(
+      "%s/%s.txt", 
+      sync_dir, delta_tibbles[[1]]$qid[1]
+      )
+    ), 
+  inv_qry_qs_1, inv_qry_qe_1
+) %>% 
+  writeXStringSet(
+    ., 
+    sprintf(
+      "%s/%s_break_seq.fasta",
+      invs_dir, 
+      delta_tibbles[[1]]$qid[1]
+      )
+    )
+
+nucmer_maxmatch_commmand( 
+  ref = 
+    sprintf(
+      "%s/%s.txt",
+      sync_dir,
+      delta_tibbles[[1]]$qid[1]
+    ),
+  qry = 
+    sprintf(
+      "%s/%s_break_seq.fasta",
+      invs_dir, 
+      delta_tibbles[[1]]$qid[1]
+      ),
+  outfile =  
+    sprintf(
+      "%s/%s_break_v_qry",
+      invs_dir, 
+      delta_tibbles[[1]]$qid[1]
+    )
+) %>% system
+
+repeat_match_coords_qry <- 
+  read_delta(
+     sprintf(
+      "%s/%s_break_v_qry.delta",
+      invs_dir, 
+      delta_tibbles[[1]]$qid[1]
+    )
+  )[, c(1:10)] %>%
+  mutate(
+    rmid = (rs+re)/2,
+    ref_p =
+      rmid/rlen,
+    ref_p2 = 
+      abs(ref_p-1)
+      )
+
+
+
+
+## is the repeat the same?
+pairwiseAlignment(
+  readDNAStringSet(
+    sprintf(
+      "%s/%s_break_seq.fasta",
+      invs_dir,
+      delta_tibbles[[1]]$rid[1]
+    )
+    )[[1]],
+  readDNAStringSet(
+    sprintf(
+      "%s/%s_break_seq.fasta",
+      invs_dir, delta_tibbles[[1]]$qid[1]
+    )
+  )
+) %>% pid(., type = "PID4")
+
+### ref
+circle_coords_ref <- 
+  tibble(
+    start = repeat_match_coords_ref$rs,
+    end = repeat_match_coords_ref$re,
+    width = end-start+1,
+    id = "repeat"
+  ) %>%
+  bind_rows(
+    IRanges(
+      repeat_match_coords_ref$rs,
+      repeat_match_coords_ref$re
+      ) %>% 
+      gaps(start = 1, end = repeat_match_coords_ref$rlen[1]) %>% 
+      as.data.frame() %>%
+      mutate(
+        id = 
+          "chromosome"
+        ) %>%
+      as_tibble
+  ) %>% 
+  arrange(start) %>%
+  mutate(
+    id = 
+      factor(
+        ifelse(
+          start ==
+            (delta_tibbles[[1]]%>% filter_delta)$rs[2] | 
+            end==
+            (delta_tibbles[[1]]%>% filter_delta)$re[2],
+          "breakpoint",
+          id
+          )
+        ),
+    s2 = 
+      ifelse(
+        (id=="repeat" | id== "breakpoint"),
+        start-10000,
+        start
+      ),
+    e2 = 
+      ifelse(
+        (id=="repeat" | id== "breakpoint"),
+        end+10000,
+        end
+      )
+    )
+  
+circle_coords_ref %>% 
+  ggplot(
+    aes(ymax=e2, ymin=s2, xmax=4, xmin=3, fill=id)
+    ) + 
+  geom_rect(colour = "black") +
+  coord_polar(theta="y", start = 0)+ 
+  theme_void(base_rect_size = 1) +  
+  xlim(c(-10, 4)) + 
+  scale_fill_manual(values = (brewer.pal(6, "Set2"))[c(2,3,6)]) +
+  #(scale_fill_brewer(palette = "Dark2")) +
+  guides(fill="none") +
+  geom_text(aes(x=3, y=-0, label = "|"), size = 5) +
+  geom_text(aes(x=2, y=-10, label = "dnaA"), size = 10)
+
+
+### qry
+circle_coords_qry <- 
+  tibble(
+    start = repeat_match_coords_qry$rs,
+    end = repeat_match_coords_qry$re,
+    width = end-start+1,
+    id = "repeat"
+  ) %>%
+  bind_rows(
+    IRanges(
+      repeat_match_coords_qry$rs,
+      repeat_match_coords_qry$re
+      ) %>% 
+      gaps(start = 1, end = repeat_match_coords_qry$rlen[1]) %>% 
+      as.data.frame() %>%
+      mutate(
+        id = 
+          "chromosome"
+        ) %>%
+      as_tibble
+  ) %>% 
+  arrange(start) %>%
+  mutate(
+    id = 
+      factor(
+        ifelse(
+          start ==
+            (delta_tibbles[[1]]%>% filter_delta)$qe[2] | 
+            end==
+            (delta_tibbles[[1]]%>% filter_delta)$qs[2],
+          "breakpoint",
+          id
+          )
+        ),
+    s2 = 
+      ifelse(
+        (id=="repeat" | id== "breakpoint"),
+        start-10000,
+        start
+      ),
+    e2 = 
+      ifelse(
+        (id=="repeat" | id== "breakpoint"),
+        end+10000,
+        end
+      )
+    )
+  
+
+circle_coords_qry %>% 
+  ggplot(
+    aes(ymax=e2, ymin=s2, xmax=4, xmin=3, fill=id)
+    ) + 
+  geom_rect(colour = "black") +
+  coord_polar(theta="y", start = 0)+ 
+  theme_void(base_rect_size = 1) +  
+   xlim(c(-10, 4)) + 
+  scale_fill_manual(values = (brewer.pal(6, "Set2"))[c(2,3,6)])+
+  #(scale_fill_brewer(palette = "Dark2")) +
+  guides(fill="none")  +
+  geom_text(aes(x=3, y=-0, label = "|"), size = 5) +
+  geom_text(aes(x=2, y=-10, label = "dnaA"), size = 10)
+
+```
+
+
+
+
+#####################################
+Mycobacterium tuberculosis
+```{r}
+inv_ref_rs_1 <- 
+  delta_tibbles[[1]]%>% filter_delta %>% filter(strand=="-") %>% pull(rs)
+
+inv_ref_re_1 <- 
+  delta_tibbles[[1]]%>% filter_delta %>% dplyr::slice(1) %>% pull(re)
+
+inv_qry_qs_1 <- 
+  delta_tibbles[[1]]%>% filter_delta %>% filter(strand=="-") %>% pull(qe)
+
+inv_qry_qe_1 <- 
+  delta_tibbles[[1]]%>% filter_delta %>% dplyr::slice(1) %>% pull(qe)
+
+### Reference
+subseq(
+  readDNAStringSet(
+    "sync/Mycobacterium/Mycobacterium_tuberculosis/NC_017524.1.txt"
+    ), 
+  inv_ref_rs_1, inv_ref_re_1
+) %>% writeXStringSet(
+  ., 
+  "invs/Mycobacterium/Mycobacterium_tuberculosis/NC_017524.1_break_seq.fasta"
+  )
+
+nucmer_maxmatch_commmand( 
+  ref = 
+    "sync/Mycobacterium/Mycobacterium_tuberculosis/NC_017524.1.txt",
+  qry = 
+    "invs/Mycobacterium/Mycobacterium_tuberculosis/NC_017524.1_break_seq.fasta",
+  outfile =  
+    "invs/Mycobacterium/Mycobacterium_tuberculosis/NC_017524.1_break_v_ref"
+) %>% system
+
+repeat_match_coords_ref <- 
+  read_delta(
+     "invs/Mycobacterium/Mycobacterium_tuberculosis/NC_017524.1_break_v_ref.delta"
+  )[, c(1:10)] %>%
+  mutate(
+    rmid = (rs+re)/2,
+    ref_p =
+      round(rmid/rlen, 2),
+    ref_p2 = 
+      round(abs(ref_p-1), 2),
+    idx = 1:n()
+      )
+cm <-
+  matrix(nrow = 15, ncol = 15)
+
+for (i in 1:15){
+  for (j in 1:15){
+    cm[i,j] <-
+      repeat_match_coords_ref$ref_p[i] +
+      repeat_match_coords_ref$ref_p[j]
+  }
+}
+
+cm[lower.tri(cm, diag = T)]<- 0
+
+### Query
+subseq(
+  readDNAStringSet(
+    "sync/Mycobacterium/Mycobacterium_tuberculosis/NC_012943.1.txt"
+    ), 
+  inv_qry_qs_1, inv_qry_qe_1
+) %>% writeXStringSet(
+  ., 
+  "invs/Mycobacterium/Mycobacterium_tuberculosis/NC_012943.1_break_seq.fasta"
+  )
+
+nucmer_maxmatch_commmand( 
+  ref = 
+    "sync/Mycobacterium/Mycobacterium_tuberculosis/NC_012943.1.txt",
+  qry = 
+    "invs/Mycobacterium/Mycobacterium_tuberculosis/NC_012943.1_break_seq.fasta",
+  outfile =  
+    "invs/Mycobacterium/Mycobacterium_tuberculosis/NC_012943.1_break_v_ref"
+) %>% system
+
+repeat_match_coords_qry <- 
+  read_delta(
+     "invs/Mycobacterium/Mycobacterium_tuberculosis/NC_012943.1_break_v_ref.delta"
+  )[, c(1:10)] %>%
+  mutate(
+    rmid = (rs+re)/2,
+    ref_p =
+      rmid/rlen,
+    ref_p2 = 
+      abs(ref_p-1)
+      )
+## is the repeat the same?
+pairwiseAlignment(
+  readDNAStringSet(
+    "invs/Mycobacterium/Mycobacterium_tuberculosis/NC_017524.1_break_seq.fasta"
+  )[[1]],
+  readDNAStringSet(
+    "invs/Mycobacterium/Mycobacterium_tuberculosis/NC_012943.1_break_seq.fasta"
+  )
+) %>% pid(., type = "PID4")
+
+### ref
+circle_coords_ref <- 
+  tibble(
+    start = repeat_match_coords_ref$rs,
+    end = repeat_match_coords_ref$re,
+    width = end-start+1,
+    id = "repeat"
+  ) %>%
+  bind_rows(
+    IRanges(
+      repeat_match_coords_ref$rs,
+      repeat_match_coords_ref$re
+      ) %>% 
+      gaps(start = 1, end = repeat_match_coords_ref$rlen[1]) %>% 
+      as.data.frame() %>%
+      mutate(
+        id = 
+          "chromosome"
+        ) %>%
+      as_tibble
+  ) %>% 
+  arrange(start) %>%
+  mutate(
+    id = 
+      factor(
+        ifelse(
+          start==931201 | end==3477514,
+          "breakpoint",
+          id
+          )
+        ),
+    s2 = 
+      ifelse(
+        (id=="repeat" | id== "breakpoint"),
+        start-15000,
+        start
+      ),
+    e2 = 
+      ifelse(
+        (id=="repeat" | id== "breakpoint"),
+        end+15000,
+        end
+      )
+    )
+  
+circle_coords_ref %>% 
+  ggplot(
+    aes(ymax=e2, ymin=s2, xmax=4, xmin=3, fill=id)
+    ) + 
+  geom_rect(colour = "black") +
+  coord_polar(theta="y", start = 0)+ 
+  theme_void(base_rect_size = 1) +  
+  xlim(c(-10, 4)) + 
+  scale_fill_manual(values = (brewer.pal(6, "Set2"))[c(2,3,6)]) +
+  #(scale_fill_brewer(palette = "Dark2")) +
+  guides(fill="none") 
+
+
+### qry
+circle_coords_qry <- 
+  tibble(
+    start = repeat_match_coords_qry$rs,
+    end = repeat_match_coords_qry$re,
+    width = end-start+1,
+    id = "repeat"
+  ) %>%
+  bind_rows(
+    IRanges(
+      repeat_match_coords_qry$rs,
+      repeat_match_coords_qry$re
+      ) %>% 
+      gaps(start = 1, end = repeat_match_coords_qry$rlen[1]) %>% 
+      as.data.frame() %>%
+      mutate(
+        id = 
+          "chromosome"
+        ) %>%
+      as_tibble
+  ) %>% 
+  arrange(start) %>%
+  mutate(
+    id = 
+      factor(
+        ifelse(
+          start==931945 | end==3481091,
+          "breakpoint",
+          id
+          )
+        ),
+    s2 = 
+      ifelse(
+        (id=="repeat" | id== "breakpoint"),
+        start-15000,
+        start
+      ),
+    e2 = 
+      ifelse(
+        (id=="repeat" | id== "breakpoint"),
+        end+15000,
+        end
+      )
+    )
+  
+
+circle_coords_qry %>% 
+  ggplot(
+    aes(ymax=e2, ymin=s2, xmax=4, xmin=3, fill=id)
+    ) + 
+  geom_rect(colour = "black") +
+  coord_polar(theta="y", start = 0)+ 
+  theme_void(base_rect_size = 1) +  
+   xlim(c(-10, 4)) + 
+  scale_fill_manual(values = (brewer.pal(6, "Set2"))[c(2,3,6)])+
+  #(scale_fill_brewer(palette = "Dark2")) +
+  guides(fill="none") 
+
+```
+
+
+```{r}
+
+prokka_bsh <- 
+     sprintf(
+       "prokka --outdir %s/%s --prefix %s %s --force",
+       invs_dir, "NC_017524.1",
+       "NC_017524.1",
+       "sync/Mycobacterium/Mycobacterium_tuberculosis/NC_017524.1.txt"
+     ) %>% system(., ignore.stdout = T, ignore.stderr = T)
+
+m_t_gff <- 
+  read_gff(
+    sprintf(
+      "%s/%s/%s.gff", 
+      invs_dir, 
+      "NC_017524.1",
+      "NC_017524.1"
+      )
+    )
+
+
+soa <- 
+  ncbi_table_clade_count %>%
+  ungroup() %>%
+  mutate(s2 = sub( " ", "_", species))
+  filter(
+    species %in%
+      c(
+        "Mycobacterium_tuberculosis", 
+        )
+      
+  )
+
+
+```
+
+3. 
+
