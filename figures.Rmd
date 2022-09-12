@@ -1,0 +1,2563 @@
+---
+title: "RASR_data_vis"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+## datasets and plot generation
+
+
+
+```{r}
+
+ncbi_table_clade_count
+
+midpoint_files <- 
+  lapply(
+    1:nrow(ncbi_table_clade_count),
+    function(i){
+      pull(ncbi_table_clade_count)
+    }
+  )
+
+# get the results from each directory
+species_results <- 
+  list()
+species_midpoints <- 
+  list()
+report_tables <- 
+  list()
+for (i in 1:nrow(ncbi_table_clade_count)){
+  species_ <-
+    pull(ncbi_table_clade_count, species2)[i]
+  genus_ <-
+    pull(ncbi_table_clade_count, genus)[i]
+  phy_ <-
+    pull(ncbi_table_clade_count, p2)[i]
+  
+  mp_file <- 
+    sprintf(
+      "r_vars/%s/%s/%s/all_midpoints.rds",
+      phy_, genus_,
+      species_
+    )
+  
+  res_report_file <- 
+    sprintf(
+      "results/%s/%s/%s/report_summary.csv",
+      phy_, genus_,
+      species_
+    )
+  out_summary_file <- 
+    sprintf(
+      "results/%s/%s/%s/out_summary.csv",
+      phy_, genus_,
+      species_
+    )
+  sync_dir <- 
+    sprintf(
+      "sync/%s/%s/%s",
+      phy_, genus_,
+      species_
+    )
+  
+  diff_tib <- 
+    sprintf(
+      "results/%s/%s/%s",
+      phy_, genus_,
+      species_
+    )
+  
+  
+  if (file.exists(mp_file)){
+    mp_table <- 
+      readRDS(mp_file) %>% group_by(ref, qry) 
+    ipc_calc <- 
+      mp_table %>%
+      group_by(ref,qry) %>% 
+      summarise(
+        mean_offset_dist = mean(abs(mid_dist)),
+        invs = n(), .groups ="keep"
+        )
+    
+    report_table <-
+      fread(res_report_file) %>%
+      mutate(
+        phy = phy_,
+        species = 
+          species_
+      )
+    
+    clust_count <- 
+      fread(out_summary_file)$genoforms
+    
+    out_tib <- 
+      tibble(
+        species = 
+          species_,
+        sequences = 
+          length(list.files(sync_dir)),
+        genoform_clusters = 
+          clust_count,
+        inversions = 
+          sum(pull(ipc_calc, invs))
+      )
+    midpoint_out <- 
+      ungroup(mp_table) %>% 
+      mutate( 
+        species = 
+          species_,
+        phy =
+          phy_
+        )
+  } else {
+    out_tib <- 
+      tibble(
+        species = 
+          species_,
+        sequences = 
+          length(list.files(sync_dir)),
+        genoform_clusters = 
+          NA,
+        inversions = 
+          NA
+      )
+    midpoint_out <- 
+      NULL
+    mp_table <- 
+      NULL
+    report_table <- 
+      NULL
+  }
+  
+  species_results[[i]] <- 
+    out_tib
+  
+  species_midpoints[[i]] <- 
+    midpoint_out
+  report_tables[[i]] <- 
+    report_table
+}
+
+species_tib <- 
+  bind_rows(species_results)
+
+midpoint_table <- 
+  bind_rows(species_midpoints) %>% 
+  mutate(abs_dist = abs(mid_dist))
+
+report_tibs <- 
+  bind_rows(report_tables)
+
+rep_rows <- 
+  report_tibs %>% 
+  group_by(phy, species) %>% 
+  summarise(rep_rows = n()) %>% 
+  arrange(rep_rows) %>% ungroup
+
+all_abs_dist <- 
+  midpoint_table %>% pull(mid_dist)  %>% abs
+
+
+
+
+# full_join(species_tib, rep_rows, by = "species")
+# 
+# spec2_list <- 
+#   full_join(rep_rows, species_tib, by = "species") %>% 
+#   filter(sequences !=rep_rows) %>% View
+#   pull(species)
+
+
+inversion_summary_tib <- 
+  left_join(
+    ungroup(
+      ncbi_table_clade_count[,c(1,6,3)] %>% 
+              rename(species2 = "species")
+      ),
+    species_tib,
+    by = "species"
+  ) %>% 
+  arrange(desc(sequences)) %>%
+  `colnames<-`(
+    c(
+      "clade", "species", 
+      "complete_genomes", 
+      "synced", "genoforms",
+      "inversions")
+  ) %>% arrange(desc(synced))
+  
+inversion_summary_tib %>% pull(clade) %>% unique
+
+inversion_summary_tib %>% mutate(gs =  genoforms/synced) %>% arrange(desc(gs)) 
+
+
+(inversion_summary_tib[c(1:3),] %>% pull(inversions) %>% sum)/
+  (inversion_summary_tib %>% pull(inversions) %>% sum(na.rm = T))
+
+inversion_summary_tib %>% filter(inversions>0) %>% pull(genoforms) %>% mean
+inversion_summary_tib %>% filter(inversions>0) %>%
+  mutate(
+    comparisons = choose(genoforms, 2),
+    invs_per_comp = inversions/comparisons
+    ) %>% pull(invs_per_comp) %>% mean
+
+
+write_csv(inversion_summary_tib, "curated_data/results_summary.csv")
+
+midpoint_table %>% group_by(species) %>% summarise(comps = n())
+
+
+
+## group mid_dist by species mean
+(midpoint_table %>% filter(abs_dist <=0.1) %>% nrow)/nrow(midpoint_table)
+
+
+midpoint_summarized <- 
+  midpoint_table %>%
+  group_by(species) %>%
+  summarise(
+    mean_dist = mean(mid_dist),
+    mean_abs_dist = mean(abs(mid_dist))
+    )
+
+
+
+mp_s <- 
+  midpoint_summarized %>% pull(mean_dist)
+sum(mp_s<=0.1 & mp_s>=-0.1)/length(mp_s)
+
+```
+
+Figure 2 (the tree)
+
+```{r}
+
+
+# function to read a delta file
+read_delta <- 
+  function(delta_path){
+    delta_lines <- 
+      (readLines(delta_path) %>% strsplit(., " "))[-c(1,2)]
+    id_lines <- 
+      delta_lines[lengths(delta_lines)==4][[1]]
+    delta_alignments <- 
+      delta_lines[lengths(delta_lines)==7] %>%
+      unlist %>%
+      matrix(., ncol = 7, byrow = T) 
+    
+    delta_alignments <- 
+      delta_alignments %>%
+      apply(., 2, as.numeric) %>%
+      matrix(., ncol = 7) %>%
+      `colnames<-`(c("rs", "re", "qs", "qe", "error", "e2", "zero")) %>% 
+      as_tibble %>%
+      dplyr::select(c(1:5)) %>%
+      mutate(
+        strand = ifelse(qe-qs > 0, '+', '-'),
+        rid = strsplit(id_lines, " ")[[1]] %>% sub(">", "", .),
+        qid = strsplit(id_lines, " ")[[2]],
+        rlen = strsplit(id_lines, " ")[[3]] %>% as.numeric,
+        qlen = strsplit(id_lines, " ")[[4]] %>% as.numeric,
+        rcov = abs(re-rs+1),
+        qcov = abs(qe-qs+1),
+        perc_error = (round(100*error/ pmax(rcov, qcov), 2))
+      ) %>% 
+      mutate(
+        meanlen = ceiling(rowMeans(. [, c("rcov", "qcov")])),
+        xmid = rlen/2,
+        X_dist = 
+          ifelse(
+            strand=="+",
+            abs((rs-qs)/sqrt(2)),
+            abs(qs + rs - qlen)/sqrt(2)
+          ),
+        X_dist_weight = 
+          X_dist * (meanlen/mean(c(rlen, qlen)))
+      )
+    return(delta_alignments)
+  }
+# function to plot a delta file
+plot_delta4 <- 
+  function(
+    delta_table, gtitle = "", 
+    xlb = NULL, ylb = NULL,
+    add_lines = TRUE
+  ){
+    
+    if (is.character(delta_table)){
+      delta_table <- read_delta(delta_table)
+    }
+    myColors <- brewer.pal(5,"Set1")[c(1,2)]
+    names(myColors) <- c("-", "+")
+    colScale <- scale_colour_manual(name = "grp",values = myColors)
+    p <- 
+      ggplot(
+        delta_table, 
+        aes(
+          x=rs, xend=re, y=qs, yend=qe, 
+          colour= factor(strand, levels = c("-", "+"))
+        ) 
+      )+
+      geom_segment(alpha=1, size = 2) + 
+      theme_classic() + 
+      theme(
+        legend.position= "none",
+        legend.justification=c(1,0),
+        axis.text=element_blank(), 
+        axis.ticks=element_blank(),
+        plot.title = element_text(hjust = 0.35)
+      ) +
+      ggtitle(gtitle) +
+
+      geom_abline(
+        intercept =
+          unique(pull(delta_table, rlen)),
+        slope = 
+          -unique(pull(delta_table, qlen))/(unique(pull(delta_table, rlen)))
+        ,
+        color="darkgrey",
+        linetype="dashed", size=.25) +
+      geom_abline(
+        intercept = 0, slope = 1, 
+        color="darkgrey",
+        linetype="dashed", size=.35) +
+      colScale +
+      scale_x_continuous(limits=c(1, delta_table$rlen[1]), expand = c(0,0)) +
+      scale_y_continuous(limits=c(1, delta_table$qlen[1]), expand = c(0,0))
+    if (is.null(xlb) & is.null(ylb)){
+      p <- 
+        p +             
+        xlab(unique(pull(delta_table, rid))) + 
+        ylab(unique(pull(delta_table, qid))) 
+    } else{
+      p <-
+        p +
+        xlab(xlb) + 
+        ylab(ylb) 
+    }
+    return(p)
+  }
+
+###### Examples of inversions in each clade
+fir_eg <-
+  plot_delta4(
+    "nucmer/Firmicutes/Staphylococcus_aureus/ava/ANONYMOUS.156_v_NZ_CP029629.1_filtered.delta"
+    ) +
+  theme(axis.title = element_blank()) +
+  theme(plot.title = element_text(face="bold", hjust = 0.5, size = 22)) +
+  labs(title=my_y_title) 
+  
+act_eg <- 
+  plot_delta4(
+    "nucmer/Actinobacteria/Mycobacterium_tuberculosis/ava/NC_017524.1_v_NC_012943.1_filtered.delta"
+    )+
+  theme(axis.title = element_blank())+
+  theme(plot.title = element_text(face="bold", hjust = 0.5, size = 20)) +
+  labs(title=expression(italic("M.tuberculosis")))
+
+ten_eg <- 
+  plot_delta4(
+    "nucmer/Tenericutes/Mycoplasma_bovis/ava/NZ_CP007589.1_v_NZ_CP022593.1_filtered.delta"
+  )+
+  theme(axis.title = element_blank())+
+  theme(plot.title = element_text(face="bold", hjust = 0.5, size = 20)) +
+  labs(title=expression(italic("M.bovis"))) 
+bac_eg <- 
+  plot_delta4(
+    "nucmer/Bacteroidetes/Porphyromonas_gingivalis/ava/NZ_CP025932.1_v_NC_002950.2_filtered.delta"
+  )+
+  theme(axis.title = element_blank())+
+  theme(plot.title = element_text(face="bold", hjust = 0.5, size = 20)) +
+  labs(title=expression(italic("P.gingivalis")))
+spi_eg <- 
+  plot_delta4(
+    "nucmer/Spirochaetes/Leptospira_interrogans/ava/NC_017551.1_v_NZ_CP043876.1_filtered.delta"
+  )+
+  theme(axis.title = element_blank())+
+  theme(plot.title = element_text(face="bold", hjust = 0.5, size = 20)) +
+  labs(title=expression(italic("L.interrogans")))
+alp_eg <- 
+  plot_delta4(
+    "nucmer/Alpha/Rickettsia_japonica/ava/NZ_AP017579.1_v_NC_016050.1_filtered.delta"
+  )+
+  theme(axis.title = element_blank())+
+  theme(plot.title = element_text(face="bold", hjust = 0.5, size = 20)) +
+  labs(title=expression(italic("R.japonica")))
+bet_eg <- 
+  plot_delta4(
+    "nucmer/Beta/Burkholderia_pseudomallei/ava2/NZ_CP009538.1_v_NC_006350.1_filtered.delta"
+  )+
+  theme(axis.title = element_blank())+
+  theme(plot.title = element_text(face="bold", hjust = 0.5, size = 20)) +
+  labs(title=expression(italic("B.pseudomallei")))
+eps_eg <- 
+  plot_delta4(
+    "nucmer/Epsilon/Campylobacter_coli/ava/NZ_CP011015.1_v_NZ_CP027638.1_filtered.delta"
+  )+
+  theme(axis.title = element_blank())+
+  theme(plot.title = element_text(face="bold", hjust = 0.5, size = 20)) +
+  labs(title=expression(italic("C.coli")))
+
+gam_eg <- 
+  plot_delta4(
+    list.files("nucmer/Gamma/Escherichia_coli/ava/", full.names = T)[59]
+  )+
+  theme(axis.title = element_blank())+
+  theme(plot.title = element_text(face="bold", hjust = 0.5, size = 20)) +
+  labs(title=expression(italic("E.coli")))
+
+ggarrange(
+  fir_eg, act_eg, ten_eg, bac_eg, spi_eg, alp_eg, bet_eg, eps_eg, gam_eg, nrow = 1#, 
+)
+
+
+#### The tree underneath
+tree_phylo <- 
+  ape::read.tree(
+    text=
+      '(((Alpha:1, Beta:1, Campylobacterota\n{Epsilon}:1, Gamma:1):4,  Bacteroidota\n{Bacteroidetes}:1,  Spirochaetota\n{Spirochaetes}:1):6, ( \nBacillota\n{Firmicutes}:1,  \nActinobacteriota\n{Actinobacteria}:1,  \nMollicutota\n{Tenericutes}:1):3);'
+    )
+
+tree_plot <-
+  ggtree(tree_phylo, branch.length="none", size =1 )+ 
+  geom_tiplab(hjust = 0.5, vjust = 0.005, size = 5) +
+  geom_cladelabel(
+    node=12, label="Pseudomonadota\n{Proteobacteria}",
+    hjust =1.5, barsize = 0, fontsize = 5, offset=-1.27
+    ) +
+  geom_treescale(width = 3, linesize=0, fontsize =0)+
+  coord_flip()
+
+```
+
+
+Figure 3 (the solar flare)
+
+
+```{r}
+mean_mps <- 
+  ggplot(
+    midpoint_summarized
+    ) +
+  stat_density(
+    aes(x=mean_dist, y=..scaled..), 
+    geom = "line", position = "identity", trim = F#, adjust=0.1
+    ) +
+  annotate(geom="text", x=0, y=0, label="|",
+              color="black") +
+  annotate(geom="text", x=0, y=-0.09, label="dnaA",
+              color="black", size = 5) +
+  xlim(-0.5,0.5) +
+  theme(
+    legend.position = "none" ,
+    plot.title = element_text(hjust = 0.5, size = 22),
+    axis.text = element_blank() ,
+    axis.ticks = element_blank(),
+    axis.title = element_blank(),
+    plot.margin=unit(c(0,0,0,0),"mm")
+    ) +
+  ggtitle(sprintf("")) +
+  scale_y_continuous(limits = c(-1, 1)) +
+  geom_hline(yintercept = 0) +
+  coord_polar(start = pi) +
+  geom_vline(xintercept = 0, linetype = "longdash", color = "grey", alpha = 0.8)
+
+
+
+```
+
+Figure 4 (the mountains)
+
+doric data handling
+```{r}
+## doric database
+ori_table <- 
+  fread("../mictools/db/doric10/tubic_bacteria.csv")
+ot <- 
+  ori_table %>%
+  dplyr::select(-c("OriC sequence")) %>%
+  as_tibble %>% 
+  mutate(
+    spe =
+      unlist(
+        lapply(
+          Organism,
+          function(org){
+            paste(unlist(strsplit(org, " "))[1:2], collapse = " ")
+          }
+          )
+      )
+  ) %>%
+  dplyr::select(c(2, 5, 7, 8)) %>%
+  `colnames<-`(c("accession", "OriC", "dnaA", "species")) %>%
+  mutate(
+    accession = gsub("\\..*", "", accession)
+    ) %>%
+  filter(dnaA != "-") %>%
+  mutate(
+    OriC = sub(" nt\\*", "", OriC),
+    dnaA = sub(" nt\\*", "", dnaA)
+  )
+
+accession_lengths <- 
+  pbmclapply(
+    1:nrow(nt_summary),
+    function(i){
+      #for (i in 1:nrow(nt_summary)){
+      ip <- pull(nt_summary, p2)[i]
+      ig <- pull(nt_summary, g)[i]
+      isp <- pull(nt_summary, species)[i]
+      
+      if(length(strsplit(ip, " ")[[1]])==2){
+        ip <- 
+          sub(" ", "_", ip)
+      }
+      stib <- 
+        fread(
+          sprintf(
+            "../mictools/results2/%s/%s/report_summary.csv",
+            ip, isp
+            )
+        )
+      
+      if ("clust" %in% colnames(stib)){
+        stib2 <- 
+          stib %>% 
+          dplyr::select(organism_name, accession, clust, len, kmer_perc) %>%
+          mutate(phylum = ip)
+      } else {
+        stib2 <- 
+          stib %>%
+          summarise(
+            organism_name = isp,
+            accession = NA,
+            clust = NA,
+            len = NA,
+            kmer_perc = NA,
+            phylum = ip
+          ) 
+      }
+      
+      return(stib2)
+    }, mc.cores = 4
+  ) %>% 
+  bind_rows() %>%
+  arrange(desc(clust))
+
+al <- 
+  report_tibs %>%
+  dplyr::select(c(phy, species, accession, clust, len)) %>%
+  mutate(
+    accession = gsub("\\..*", "", accession)
+    )
+
+ot_lengths_1 <- 
+  inner_join(ot, al , by = "accession") %>%
+  distinct %>% 
+  separate(OriC, into = c("ori_s", "ori_e")) 
+
+## for species with different accessions
+ot_lengths_2 <- 
+  inner_join(
+    ot %>% mutate(species = gsub(" ", "_", species)), 
+    al %>% 
+      group_by(phy, species) %>% 
+      summarise(meanlen = mean(len), .groups = "keep"),
+    by = "species"
+    
+    ) %>%
+  distinct %>% 
+  separate(OriC, into = c("ori_s", "ori_e")) 
+!((al %>% group_by(species) %>% summarise(meanlen = mean(len)) %>% pull(species)) %in%
+(ot %>% mutate(species = gsub(" ", "_", species)) %>% pull(species) %>% unique) )
+
+ot_lengths_1$species.y %>% unique
+al$species %>% unique
+
+dnaa_tib <- list()
+pb <- txtProgressBar(min = 1, max = nrow(ot_lengths_2), initial = 1) 
+
+for (i in 1:nrow(ot_lengths_2)){
+  
+  ori_s <- 
+    as.numeric(pull(ot_lengths_2[i,], ori_s))
+
+  ori_e <- 
+    as.numeric(pull(ot_lengths_2[i,], ori_e))
+  
+  gen_len <- 
+    pull(ot_lengths_2[i,], meanlen)
+  
+  ori_end_dist <- 
+    gen_len-ori_e 
+  
+  if (is.na(ori_s)) stop()
+  if (is.na(ori_e)) stop()
+  
+  dnaA_locations <- 
+    gsub("\\..","-", pull(ot_lengths_2[i,], dnaA)) %>%
+    strsplit(
+      ., split = ", "
+    ) %>%
+    unlist %>% 
+   strsplit(
+      ., split = "; "
+    ) %>%
+    unlist
+  
+  dnaa_tib[[i]] <-
+    read.table(
+      text = dnaA_locations, 
+      sep = "-", 
+      col.names = c("dnaa_s", "dnaa_e")
+      ) %>%
+    mutate(
+      dnaa_s = as.numeric(dnaa_s),
+      dnaa_e = as.numeric(dnaa_e)
+    ) %>%
+    as_tibble %>%
+    rowwise() %>%
+    mutate(
+      accession =
+        pull(ot_lengths_2[i,], accession),
+      len =
+        pull(ot_lengths_2[i,], meanlen),
+      org = 
+        pull(ot_lengths_2[i,], species),
+      phylum = 
+        pull(ot_lengths_2[i,], phy),
+      ori_s =
+        ori_s,
+      ori_e =
+        ori_e,
+      dnaa_e_end =
+        abs(gen_len-dnaa_e),
+      ori_e_end =
+        abs(gen_len-ori_e),
+      ori_left1 =
+        abs(ori_s-dnaa_e),
+      ori_right1 =
+        abs(dnaa_s-ori_e),
+      dnaa_around_dist =
+        abs(dnaa_e_end+ori_s),
+      ori_around_dist =
+        abs(ori_e_end+dnaa_s),
+      min_dist = 
+        min(
+          ori_left1, ori_right1,
+          dnaa_around_dist, ori_around_dist
+        ) 
+      ) %>%
+    ungroup 
+  
+  if (is.na(dnaa_tib[[i]]$dnaa_s[1])) stop()
+  setTxtProgressBar(pb,i)
+}
+
+final_dnaa_dists <- 
+  bind_rows(dnaa_tib) %>%
+  #dplyr::select(c(1:9, 16)) %>%
+  # group_by(org) %>%
+  # filter(min_dist == min(min_dist)) %>%
+  # dplyr::slice(1) %>%
+  # ungroup %>%
+  mutate(min_dist_prop = round(min_dist/len, 4)) %>%
+  mutate(
+    min_dist_prop = 
+      ifelse(
+        min_dist==1,
+        0, 
+        ifelse(
+          ori_s>dnaa_e,
+          min_dist_prop,
+          -min_dist_prop
+        )
+      ),
+     mdp = 
+      ifelse(
+        min_dist==1,
+        "zero",
+        ifelse(
+          ori_s>dnaa_e,
+          "+", 
+          "-"
+        )
+        )
+    ) #%>%
+  # filter(
+  #   accession %in% 
+  #     (al$accession %>% gsub("\\..*", "", .))
+  # )
+final_dnaa_dists %>% filter(org=="Aeromonas_hydrophila") %>% View
+
+ds2 <- 
+  final_dnaa_dists  %>% 
+  dplyr::select(c(phylum, org, mdp, min_dist_prop)) %>%
+  mutate(org = sub("_", " ", org))
+
+dori_summary <- 
+  final_dnaa_dists %>%
+  group_by(org, mdp) %>%
+  summarise(
+    dd_mean = 
+      mean(min_dist_prop),
+    dd_min = 
+      ifelse(
+        mdp=="+",
+        min(min_dist_prop),
+        ifelse(
+          mdp=="-", 
+          max(min_dist_prop),
+          0
+          )
+        ),
+    dd_max = 
+      ifelse(
+        mdp=="+",
+        max(min_dist_prop),
+        ifelse(
+          mdp=="-", 
+          min(min_dist_prop),
+          0
+          )
+        ),
+    .groups = "keep"
+  ) %>%
+  ungroup(org) %>%
+  mutate(org = sub("_", " ", org)) %>% distinct
+
+dori_summary %>% pull(org) %>% unique
+
+dori_summary
+
+```
+
+gamma mountains
+```{r}
+complete_phyla_invs_point <- 
+  midpoint_table %>% 
+  #mutate(dnaa_dist = midpoint-0.5) %>%
+  add_count(species, name = "invs", sort = T)
+
+complete_gamma_invs <- 
+  complete_phyla_invs_point %>%  #filter(species=="Acinetobacter_baumannii")
+  #filter(!is.na(mid_dist)) %>%
+  filter(phy=="Gamma") %>%
+  #group_by(species) %>%
+  mutate(
+    #abs_dist = sum(abs(mid_dist))/sum(invs),
+    mean_abs_dist = mean(abs(mid_dist)),
+    mdp =
+      ifelse(
+        mid_dist>0,
+        "+",
+        ifelse(
+          mid_dist<0,
+          "-",
+          "zero"
+          )
+        )
+  ) %>% ## group by comparison, +ve or -ve
+  ungroup %>%
+  arrange(mean_abs_dist) %>%
+  mutate(
+    org = sub("_", " ", species),
+    org = factor(org, levels = rev(unique(org)))
+  ) %>%
+  filter(invs > 30) %>%
+  group_by(phy, org, ref, qry, mdp) %>%
+  summarize(
+    mean_dnaa_dist = 
+      mean(mid_dist), 
+    invs = unique(invs),
+    .groups = "keep"
+  ) %>% 
+  ungroup %>%
+  mutate(
+    organism_name = 
+      gsub(" ", "_", org)
+  ) %>%
+  left_join(
+    ., 
+    inversion_summary_tib %>% mutate(organism_name = species), 
+    by = "organism_name"
+  ) %>%
+  filter(genoforms >= 5) %>%
+  group_by(org) %>%
+  mutate(
+    mean_abs_dnaa_dist =
+      mean(abs(mean_dnaa_dist))
+  ) %>%
+  ungroup %>%
+  arrange(mean_abs_dnaa_dist) %>%
+  mutate(
+    org = factor(org, levels = rev(unique(org)))
+  )
+
+cgi <- 
+  complete_gamma_invs %>% 
+  dplyr::select(phy, org, mdp, synced, genoforms, inversions, mean_dnaa_dist, mean_abs_dnaa_dist) %>%
+  arrange(mean_abs_dnaa_dist) %>%
+  mutate(
+    invs2 = prettyNum(inversions, big.mark = ","),
+    org2 = 
+      (factor(paste0(org, " (", invs2, ")"), levels = unique(paste0(org, " (", invs2, ")")))) 
+  )
+## get dori summary
+cgi1 <- 
+  cgi %>%
+  group_by(phy, org, mdp, org2) %>%
+  summarise(
+    mean_dnaa_dist =mean(mean_dnaa_dist),
+    invs = unique(inversions),
+    genoforms = unique(genoforms),
+    .groups = "keep"
+  ) 
+cgi2 <- 
+  left_join(
+    cgi1, 
+    ds2[-1,],
+    by = c("org")
+  ) %>%
+  filter(!is.na(min_dist_prop)) %>%
+  mutate(
+    invs2 = prettyNum(invs, big.mark = ",")
+  ) %>%
+  group_by(phy, org, mdp.y) %>%
+  filter(
+    min_dist_prop == 
+      min_dist_prop[abs(min_dist_prop-mean_dnaa_dist)==min(abs(min_dist_prop-mean_dnaa_dist))][1] |
+      min_dist_prop==0
+  )
+  # mutate(
+  #   org = factor(org, levels = rev(unique(complete_gamma_invs$org)))
+  # ) %>%
+  #rowwise() %>%
+
+  
+gamma_dists <- 
+  ggplot(cgi, 
+    aes(
+      x = mean_dnaa_dist, y = fct_rev(org2), 
+      group = fct_rev(org2), fill = mean_abs_dnaa_dist)
+  ) + 
+  theme_classic(base_size = 24) +
+  geom_density_ridges( 
+    rel_min_height = 0.05, scale =1,alpha = 0.6, bandwidth=0.025
+  ) +
+  # geom_label(
+  #     data = cgi2, 
+  #     aes(y = org, x = dd_mean, label = "|")
+  #     ) +
+  #scale_fill_gradient2(low = "cyan", mid = "darkgreen", high = "burlywood4") +
+  scale_fill_viridis_c(name = "Mean absolute dnaA distance", option = "C") +
+  theme(
+    legend.position="none",
+    #panel.grid.major = element_line()
+    panel.grid.major.y = element_line(color = "grey80")
+  ) +
+  scale_x_continuous(breaks = seq(-0.5, 0.5, 0.1),limits = c(-.5, 0.5)) +
+  ylab("") + 
+  xlab("Proportionate dnaA distance") +
+  geom_vline(xintercept = 0, linetype = "dashed", size = 0.5) 
+  # geom_point(
+  #   data = 
+  #     cgi2,
+  #   aes(x = min_dist_prop, y = fct_rev(org2)),
+  #   color = "red",
+  #   size = 1,
+  #   inherit.aes = FALSE) +
+  # theme(axis.text.y = element_text(face = "italic"))+
+  # labs(tag = "a)")
+
+
+final_gamma_plot <- 
+  gamma_dists +
+  geom_point(data = cgi2,
+             aes(x = min_dist_prop, y = org2),
+             shape = 21, fill = "red", colour = "black",
+               #color = "red",
+               size = 2,
+               inherit.aes = FALSE) +
+  theme(axis.text.y = element_text(face = "italic"))  +
+  labs(tag = "a)")
+  
+```
+
+Non gamma mountains
+```{r}
+complete_phyla_invs_point <- 
+  midpoint_table %>% 
+  #mutate(dnaa_dist = midpoint-0.5) %>%
+  add_count(species, name = "invs", sort = T)
+
+complete_other_invs <- 
+  complete_phyla_invs_point %>%  #filter(species=="Acinetobacter_baumannii")
+  #filter(!is.na(mid_dist)) %>%
+  filter(phy!="Gamma") %>%
+  #group_by(species) %>%
+  mutate(
+    #abs_dist = sum(abs(mid_dist))/sum(invs),
+    mean_abs_dist = mean(abs(mid_dist)),
+    mdp =
+      ifelse(
+        mid_dist>0,
+        "+",
+        ifelse(
+          mid_dist<0,
+          "-",
+          "zero"
+          )
+        )
+  ) %>% ## group by comparison, +ve or -ve
+  ungroup %>%
+  arrange(mean_abs_dist) %>%
+  mutate(
+    org = sub("_", " ", species),
+    org = factor(org, levels = rev(unique(org)))
+  ) %>%
+  filter(invs > 30) %>%
+  group_by(phy, org, ref, qry, mdp) %>%
+  summarize(
+    mean_dnaa_dist = 
+      mean(mid_dist), 
+    invs = unique(invs),
+    .groups = "keep"
+  ) %>% 
+  ungroup %>%
+  mutate(
+    organism_name = 
+      gsub(" ", "_", org)
+  ) %>%
+  left_join(
+    ., 
+    inversion_summary_tib %>% mutate(organism_name = species), 
+    by = "organism_name"
+  ) %>%
+  filter(genoforms >= 5) %>%
+  group_by(org) %>%
+  mutate(
+    mean_abs_dnaa_dist =
+      mean(abs(mean_dnaa_dist))
+  ) %>%
+  ungroup %>%
+  arrange(mean_abs_dnaa_dist) %>%
+  mutate(
+    org = factor(org, levels = rev(unique(org)))
+  )
+
+coi <- 
+  complete_other_invs %>% 
+  dplyr::select(phy, org, mdp, synced, genoforms, inversions, mean_dnaa_dist, mean_abs_dnaa_dist) %>%
+  arrange(mean_abs_dnaa_dist) %>%
+  mutate(
+    invs2 = prettyNum(inversions, big.mark = ","),
+    org2 = 
+      (factor(paste0(org, " (", invs2, ")"), levels = unique(paste0(org, " (", invs2, ")")))) 
+  )
+## get dori summary
+coi1 <- 
+  coi %>%
+  group_by(phy, org, mdp, org2) %>%
+  summarise(
+    mean_dnaa_dist =mean(mean_dnaa_dist),
+    invs = unique(inversions),
+    genoforms = unique(genoforms),
+    .groups = "keep"
+  ) 
+coi2 <- 
+  left_join(
+    coi1, 
+    ds2[-1,],
+    by = c("org")
+  ) %>%
+  filter(!is.na(min_dist_prop)) %>%
+  mutate(
+    invs2 = prettyNum(invs, big.mark = ",")
+  ) %>%
+  group_by(phy, org, mdp.y) %>%
+  filter(
+    min_dist_prop == 
+      min_dist_prop[abs(min_dist_prop-mean_dnaa_dist)==min(abs(min_dist_prop-mean_dnaa_dist))][1] |
+      min_dist_prop==0
+  )
+  # mutate(
+  #   org = factor(org, levels = rev(unique(complete_gamma_invs$org)))
+  # ) %>%
+  #rowwise() %>%
+
+  
+other_dists <- 
+  ggplot(coi, 
+    aes(
+      x = mean_dnaa_dist, y = fct_rev(org2), 
+      group = fct_rev(org2), fill = mean_abs_dnaa_dist)
+  ) + 
+  theme_classic(base_size = 24) +
+  geom_density_ridges( 
+    rel_min_height = 0.05, scale =1,alpha = 0.6, bandwidth=0.025
+  ) +
+  # geom_label(
+  #     data = cgi2, 
+  #     aes(y = org, x = dd_mean, label = "|")
+  #     ) +
+  #scale_fill_gradient2(low = "cyan", mid = "darkgreen", high = "burlywood4") +
+  scale_fill_viridis_c(name = "Mean absolute dnaA distance", option = "C") +
+  theme(
+    legend.position="none",
+    #panel.grid.major = element_line()
+    panel.grid.major.y = element_line(color = "grey80")
+  ) +
+  scale_x_continuous(breaks = seq(-0.5, 0.5, 0.1),limits = c(-.5, 0.5)) +
+  ylab("") + 
+  xlab("Proportionate dnaA distance") +
+  geom_vline(xintercept = 0, linetype = "dashed", size = 0.5) 
+  # geom_point(
+  #   data = 
+  #     cgi2,
+  #   aes(x = min_dist_prop, y = fct_rev(org2)),
+  #   color = "red",
+  #   size = 1,
+  #   inherit.aes = FALSE) +
+  # theme(axis.text.y = element_text(face = "italic"))+
+  # labs(tag = "a)")
+
+
+final_other_plot <- 
+  other_dists +
+  geom_point(data = coi2,
+             aes(x = min_dist_prop, y = org2),
+             shape = 21, fill = "red", colour = "black",
+               #color = "red",
+               size = 2,
+               inherit.aes = FALSE) +
+  theme(axis.text.y = element_text(face = "italic"))  +
+  labs(tag = "b)")
+  
+```
+
+
+```{r}
+cgi3 <- 
+  left_join(
+    complete_gamma_invs, dori_summary, by = c("org", "mdp")
+  ) %>%
+  mutate(
+    invs2 = prettyNum(invs, big.mark = ",")
+  ) %>%
+  # mutate(
+  #   org = factor(org, levels = rev(unique(complete_gamma_invs$org)))
+  # ) %>%
+  #rowwise() %>%
+  mutate(
+    org2 = 
+      (factor(paste0(org, " (", invs2, ")"))) %>%
+      fct_rev
+  ) %>%
+  ungroup 
+cgi3 <- 
+  cgi2 %>% 
+ group_by(phy, org, mdp) %>%
+  summarise(
+    mmdd = mean(mean_dnaa_dist),
+    closest_dori = 
+  )
+  mutate(
+    min_dist = 
+      (mean_dnaa_dist-dd_min),
+    mean_dist = 
+      (mean_dnaa_dist-dd_mean),
+    max_dist = 
+      (mean_dnaa_dist-dd_max),
+    closest_ori = 
+      c(dd_min, dd_mean, dd_max)[
+        c(min_dist, mean_dist, max_dist)-mean_dnaa_dist==
+      min( c(min_dist, mean_dist, max_dist)-mean_dnaa_dist)
+      ][1]
+    )
+      
+  ) %>%
+  dplyr::slice(1) %>% ungroup 
+
+cgi4 <- 
+  inner_join(
+    dori_summary, distinct(complete_gamma_invs[,c(1,2,6,10)]), by = "org"
+  ) %>%
+  mutate(
+    org = factor(org, levels = rev(unique(complete_gamma_invs$org)))
+  )
+
+complete_gamma_invs %>% pull(org) %>% levels
+
+gamma_dists <- 
+  ggplot(cgi3, 
+    aes(
+      x = mean_dnaa_dist, y = fct_rev(org2), 
+      group = fct_rev(org2), fill = mean_abs_dnaa_dist)
+  ) + 
+  theme_classic(base_size = 24) +
+  geom_density_ridges( 
+    rel_min_height = 0.05, scale =1,alpha = 0.6, bandwidth=0.025
+  ) +
+  # geom_label(
+  #     data = cgi2, 
+  #     aes(y = org, x = dd_mean, label = "|")
+  #     ) +
+  #scale_fill_gradient2(low = "cyan", mid = "darkgreen", high = "burlywood4") +
+  scale_fill_viridis_c(name = "Mean absolute dnaA distance", option = "C") +
+  theme(
+    legend.position="none",
+    #panel.grid.major = element_line()
+    panel.grid.major.y = element_line(color = "grey80")
+  ) +
+  scale_x_continuous(breaks = seq(-0.5, 0.5, 0.1),limits = c(-.5, 0.5)) +
+  ylab("") + 
+  xlab("Proportionate dnaA distance") +
+  geom_vline(xintercept = 0, linetype = "dashed", size = 0.5) +
+  geom_point(
+    data = 
+      cgi2,
+    aes(x = min_dist_prop, y = fct_rev(org2)),
+    color = "red",
+    size = 1,
+    inherit.aes = FALSE) +
+  theme(axis.text.y = element_text(face = "italic"))+
+  labs(tag = "a)")
+
+
+final_gamma_plot <- 
+  gamma_dists +
+  geom_point(data = cgi2,
+               aes(x = dd_mean, y = org),
+               color = "red",
+               size = 1,
+               inherit.aes = FALSE) +
+  theme(axis.text.y = element_text(face = "italic"))
+```
+
+
+```{r}
+
+complete_phyla_invs_summary <- 
+  midpoint_table %>%
+  #mutate(mid_dist = midpoint-0.5) %>%
+  group_by(phy,species) %>%
+  summarise(
+    mean_dist =mean(mid_dist, na.rm = T), 
+    inversions=n(),
+    .groups = "keep"
+    ) %>%
+  arrange(desc(inversions)) %>%
+  rowwise() %>%
+  mutate(
+    sync_seqs = 
+      length(
+        list.files(
+          sprintf(
+            "sync/%s/%s/%s", 
+            phy, 
+            strsplit(species, split = "_")[[1]][1], 
+            species
+            ), 
+          pattern = ".txt"
+          )
+        )
+  ) 
+
+
+
+cgi2 <- 
+  inner_join(
+    complete_gamma_invs, dori_summary, by = "org"
+  ) %>%
+  mutate(
+    org = factor(org, levels = rev(unique(complete_gamma_invs$org)))
+  )
+
+cgi3 <- 
+  left_join(
+    complete_gamma_invs, dori_summary, by = "org"
+  ) %>%
+  mutate(
+    org = factor(org, levels = rev(unique(complete_gamma_invs$org)))
+  )
+
+gamma_dists <- 
+  ggplot(
+    cgi3, 
+    aes(x = mean_dnaa_dist, y = org, group = org, fill = mean_abs_dnaa_dist)
+  ) + 
+  theme_classic(base_size = 24) +
+  geom_density_ridges( 
+    rel_min_height = 0.05, scale =1,alpha = 0.6, bandwidth=0.025
+  ) +
+  # geom_label(
+  #     data = cgi2, 
+  #     aes(y = org, x = dd_mean, label = "|")
+  #     ) +
+  #scale_fill_gradient2(low = "cyan", mid = "darkgreen", high = "burlywood4") +
+  scale_fill_viridis_c(name = "Mean absolute dnaA distance", option = "C") +
+  theme(
+    legend.position="none",
+    #panel.grid.major = element_line()
+    panel.grid.major.y = element_line(color = "grey80")
+  ) +
+  scale_x_continuous(breaks = seq(-0.5, 0.5, 0.1),limits = c(-.5, 0.5)) +
+  ylab("") + 
+  xlab("Proportionate dnaA distance") +
+  geom_vline(xintercept = 0, linetype = "dashed", size = 0.5)
+
+
+final_gamma_plot <- 
+  gamma_dists +
+  geom_point(data = cgi2,
+               aes(x = dd_mean, y = org),
+               color = "red",
+               size = 1,
+               inherit.aes = FALSE)
+final_gamma_plot
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+phyla <- 
+  #prev_ncbi_table %>% 
+  ncbi_table %>%
+  add_count(species, name = "spec_count") %>%
+  filter(spec_count>=10) %>%
+  pull(p2) %>% 
+  unique
+
+all_phyla_invs <- 
+  lapply(
+    1:length(phyla), 
+    function(i){
+      phylum_i = 
+        phyla[i]
+    
+    phyla_tib <- 
+      #prev_ncbi_table %>%
+      ncbi_table_clade_count %>%
+      filter(p2 == phylum_i) %>%
+      mutate(species = as.character(species)) %>%
+      mutate(species2 = sub(" ", "_", species)) 
+    
+    if (length(phyla_tib!=0)){
+      all_phyla_invs <- 
+      pbmclapply(
+        pull(phyla_tib, species2),
+        function(x){
+          #for (x in pull(Bacter_summary, org)){
+           #x <- 
+          #   pull(phyla_tib, species2)[1]
+           r_file <- 
+             sprintf(
+               "r_vars/%s/%s/all_midpoints.rds",
+               phylum_i,
+               x
+               )
+           if (file.exists(r_file)){
+             outtib <- 
+               readRDS(r_file) %>%
+               dplyr::select(-c(mpc, mpc_prop)) %>%
+               mutate(
+                 org = x,
+                 phylum = phylum_i
+               )
+             
+           } else{
+             outtib <- 
+               tibble(
+                 ref = "",
+                 qry = "",
+                 midpoint = 0,
+                 org = x,
+                phylum = phylum_i
+               )
+           }
+   
+           return(outtib)
+        }
+      ) %>% 
+      bind_rows %>%
+      dplyr::select(c(1:5)) %>%
+      filter(!is.na(midpoint))
+    }
+    
+    }
+  ) %>%  
+  bind_rows %>%
+  filter(ref !="")
+
+
+all_phyla_invs %>% 
+  group_by(org) %>% 
+  summarise(
+    meanmid = mean(midpoint),
+    comparisons = n()
+    ) 
+
+(all_phyla_invs %>% pull(org) %>% unique)[
+  !((all_phyla_invs %>% pull(org) %>% unique)%in%
+      (all_report_summary %>% pull(org)))
+  ]
+
+(all_report_summary %>% pull(org))[
+  !((all_report_summary %>% pull(org))%in%
+      (all_phyla_invs %>% pull(org) %>% unique))
+  ]
+
+phyla_summary_table <- 
+  fread("../mictools/results2/species_summary_table.csv") %>% 
+      mutate(flipped_mean = midmean-0.5, flipped_median = midmedian-0.5)
+
+mean_mps <- 
+  ggplot(
+    phyla_summary_table %>%
+      filter(!is.na(flipped_mean))
+    ) +
+  stat_density(
+    aes(x=flipped_mean, y=..scaled..), 
+    geom = "line", position = "identity", trim = F#, adjust=0.1
+    ) +
+  annotate(geom="text", x=0, y=0, label="|",
+              color="black") +
+  annotate(geom="text", x=0, y=-0.09, label="dnaA",
+              color="black", size = 5) +
+  #geom_bar(aes(x=midpoint, y=..scaled..), stat="identity", width = 0.001) +
+  # geom_text(aes(x=0, y=-0, label = "|")) +
+  # geom_text(aes(x=0, y=-.09, label = "dnaA", size = 18)) +
+  xlim(-0.5,0.5) +
+  theme(
+    legend.position = "none" ,
+    plot.title = element_text(hjust = 0.5, size = 22),
+    axis.text = element_blank() ,
+    axis.ticks = element_blank(),
+    axis.title = element_blank(),
+    plot.margin=unit(c(0,0,0,0),"mm")
+    ) +
+  ggtitle(sprintf("")) +
+  scale_y_continuous(limits = c(-1, 1)) +
+  geom_hline(yintercept = 0) +
+  coord_polar(start = pi) +
+  geom_vline(xintercept = 0, linetype = "longdash", color = "grey", alpha = 0.8)
+
+mean_mps <- 
+  ggplot(
+    phyla_summary_table %>%
+      filter(!is.na(flipped_mean))
+    ) +
+  stat_density(
+    aes(x=flipped_mean, y=..scaled..), 
+    geom = "line", position = "identity", trim = F#, adjust=0.1
+    ) +
+  annotate(geom="text", x=0, y=0, label="|",
+              color="black") +
+  annotate(geom="text", x=0, y=-0.09, label="dnaA",
+              color="black", size = 5) +
+  #geom_bar(aes(x=midpoint, y=..scaled..), stat="identity", width = 0.001) +
+  # geom_text(aes(x=0, y=-0, label = "|")) +
+  # geom_text(aes(x=0, y=-.09, label = "dnaA", size = 18)) +
+  xlim(-0.5,0.5) +
+  theme(
+    legend.position = "none" ,
+    plot.title = element_text(hjust = 0.5, size = 22),
+    axis.text = element_blank() ,
+    axis.ticks = element_blank(),
+    axis.title = element_blank(),
+    plot.margin=unit(c(0,0,0,0),"mm")
+    ) +
+  ggtitle(sprintf("")) +
+  scale_y_continuous(limits = c(-1, 1)) +
+  geom_hline(yintercept = 0) +
+  coord_polar(start = pi) +
+  geom_vline(xintercept = 0, linetype = "longdash", color = "grey", alpha = 0.8)
+
+inv_summary2 <- 
+  inv_summary %>% 
+  mutate(mean_mean_mid_flip = mean_mean_midpoint-0.5)
+
+mean_mps2 <- 
+  ggplot(
+    inv_summary2 %>%
+      filter(!is.na(mean_mean_mid_flip))
+    ) +
+  stat_density(
+    aes(x=mean_mean_mid_flip, y=..scaled..), 
+    geom = "line", position = "identity", trim = F#, adjust=0.1
+    ) +
+  annotate(geom="text", x=0, y=0, label="|",
+              color="black") +
+  annotate(geom="text", x=0, y=-0.09, label="dnaA",
+              color="black", size = 5) +
+  #geom_bar(aes(x=midpoint, y=..scaled..), stat="identity", width = 0.001) +
+  # geom_text(aes(x=0, y=-0, label = "|")) +
+  # geom_text(aes(x=0, y=-.09, label = "dnaA", size = 18)) +
+  xlim(-0.5,0.5) +
+  theme(
+    legend.position = "none" ,
+    plot.title = element_text(hjust = 0.5, size = 22),
+    axis.text = element_blank() ,
+    axis.ticks = element_blank(),
+    axis.title = element_blank(),
+    plot.margin=unit(c(0,0,0,0),"mm")
+    ) +
+  ggtitle(sprintf("")) +
+  scale_y_continuous(limits = c(-1, 1)) +
+  geom_hline(yintercept = 0) +
+  coord_polar(start = pi) +
+  geom_vline(xintercept = 0, linetype = "longdash", color = "grey", alpha = 0.8)
+
+```
+
+## mountains
+```{r}
+## doric database
+ori_table <- 
+  fread("../mictools/db/doric10/tubic_bacteria.csv")
+ot <- 
+  ori_table %>%
+  dplyr::select(-c("OriC sequence")) %>%
+  as_tibble %>% 
+  mutate(
+    spe =
+      unlist(
+        lapply(
+          Organism,
+          function(org){
+            paste(unlist(strsplit(org, " "))[1:2], collapse = " ")
+          }
+          )
+      )
+  ) %>%
+  dplyr::select(c(2, 5, 7, 8)) %>%
+  `colnames<-`(c("accession", "OriC", "dnaA", "species")) %>%
+  mutate(
+    accession = gsub("\\..*", "", accession)
+    ) %>%
+  filter(dnaA != "-") %>%
+  mutate(
+    OriC = sub(" nt\\*", "", OriC),
+    dnaA = sub(" nt\\*", "", dnaA)
+  )
+
+accession_lengths <- 
+  pbmclapply(
+    1:nrow(nt_summary),
+    function(i){
+      #for (i in 1:nrow(nt_summary)){
+      ip <- pull(nt_summary, p2)[i]
+      ig <- pull(nt_summary, g)[i]
+      isp <- pull(nt_summary, species)[i]
+      
+      if(length(strsplit(ip, " ")[[1]])==2){
+        ip <- 
+          sub(" ", "_", ip)
+      }
+      stib <- 
+        fread(
+          sprintf(
+            "../mictools/results2/%s/%s/report_summary.csv",
+            ip, isp
+            )
+        )
+      
+      if ("clust" %in% colnames(stib)){
+        stib2 <- 
+          stib %>% 
+          dplyr::select(organism_name, accession, clust, len, kmer_perc) %>%
+          mutate(phylum = ip)
+      } else {
+        stib2 <- 
+          stib %>%
+          summarise(
+            organism_name = isp,
+            accession = NA,
+            clust = NA,
+            len = NA,
+            kmer_perc = NA,
+            phylum = ip
+          ) 
+      }
+      
+      return(stib2)
+    }, mc.cores = 4
+  ) %>% 
+  bind_rows() %>%
+  arrange(desc(clust))
+
+al <- 
+  accession_lengths %>%
+  dplyr::select(c(phylum, organism_name, accession, clust, len)) %>%
+  mutate(
+    accession = gsub("\\..*", "", accession)
+    )
+
+ot_lengths <- 
+  inner_join(ot, al , by = "accession") %>%
+  distinct %>% 
+  separate(OriC, into = c("ori_s", "ori_e")) 
+
+dnaa_tib <- list()
+pb <- txtProgressBar(min = 1, max = nrow(ot_lengths), initial = 1) 
+
+for (i in 1:nrow(ot_lengths)){
+  
+  ori_s <- 
+    as.numeric(pull(ot_lengths[i,], ori_s))
+
+  ori_e <- 
+    as.numeric(pull(ot_lengths[i,], ori_e))
+  
+  gen_len <- 
+    pull(ot_lengths[i,], len)
+  
+  ori_end_dist <- 
+    gen_len-ori_e 
+  
+  if (is.na(ori_s)) stop()
+  if (is.na(ori_e)) stop()
+  
+  dnaA_locations <- 
+    gsub("\\..","-", pull(ot_lengths[i,], dnaA)) %>%
+    strsplit(
+      ., split = ", "
+    ) %>%
+    unlist %>% 
+   strsplit(
+      ., split = "; "
+    ) %>%
+    unlist
+  
+  dnaa_tib[[i]] <-
+    read.table(
+      text = dnaA_locations, 
+      sep = "-", 
+      col.names = c("dnaa_s", "dnaa_e")
+      ) %>%
+    mutate(
+      dnaa_s = as.numeric(dnaa_s),
+      dnaa_e = as.numeric(dnaa_e)
+    ) %>%
+    as_tibble %>%
+    rowwise() %>%
+    mutate(
+      accession =
+        pull(ot_lengths[i,], accession),
+      len =
+        pull(ot_lengths[i,], len),
+      org = 
+        pull(ot_lengths[i,], organism_name),
+      clust = 
+        pull(ot_lengths[i,], clust),
+      phylum = 
+        pull(ot_lengths[i,], phylum),
+      ori_s =
+        ori_s,
+      ori_e =
+        ori_e,
+      dnaa_e_end =
+        abs(gen_len-dnaa_e),
+      ori_e_end =
+        abs(gen_len-ori_e),
+      ori_left1 =
+        abs(ori_s-dnaa_e),
+      ori_right1 =
+        abs(dnaa_s-ori_e),
+      dnaa_around_dist =
+        abs(dnaa_e_end+ori_s),
+      ori_around_dist =
+        abs(ori_e_end+dnaa_s),
+      min_dist = 
+        min(
+          ori_left1, ori_right1,
+          dnaa_around_dist, ori_around_dist
+        ) 
+      ) %>%
+    ungroup 
+  
+  if (is.na(dnaa_tib[[i]]$dnaa_s[1])) stop()
+  setTxtProgressBar(pb,i)
+}
+
+
+dori_summary <- 
+  final_dnaa_dists %>%
+  group_by(org, mdp) %>%
+  summarise(
+    dd_mean = 
+      mean(min_dist_prop)
+  ) %>%
+  ungroup(org) %>%
+  mutate(org = sub("_", " ", org))
+
+final_dnaa_dists <- 
+  bind_rows(dnaa_tib) %>%
+  dplyr::select(c(1:9, 16)) %>%
+  group_by(accession) %>%
+  filter(min_dist == min(min_dist)) %>%
+  dplyr::slice(1) %>%
+  ungroup %>%
+  mutate(min_dist_prop = round(min_dist/len, 4)) %>%
+  mutate(
+    min_dist_prop = 
+      ifelse(
+        min_dist==1,
+        0, 
+        ifelse(
+          ori_s>dnaa_e,
+          min_dist_prop,
+          -min_dist_prop
+        )
+      ),
+     mdp = 
+      ifelse(
+        min_dist==1,
+        "zero",
+        ifelse(
+          ori_s>dnaa_e,
+          "+", 
+          "-"
+        )
+        )
+    ) 
+
+```
+
+
+
+
+```{r}
+
+complete_phyla_invs_summary <- 
+  all_phyla_invs %>%
+  mutate(mid_dist = midpoint-0.5) %>%
+  group_by(phylum,org) %>%
+  summarise(mean_dist =mean(mid_dist, na.rm = T), inversions=n()) %>%
+  arrange(desc(inversions)) %>%
+  rowwise() %>%
+  mutate(
+    sync_seqs = 
+      length(list.files(sprintf("../mictools/db/synced/%s/%s/", phylum, org), pattern = ".txt"))
+  ) 
+
+complete_phyla_invs_point <- 
+  all_phyla_invs %>% 
+  mutate(dnaa_dist = midpoint-0.5) %>%
+  add_count(org, name = "invs", sort = T)
+
+complete_gamma_invs <- 
+  complete_phyla_invs_point %>% 
+  filter(phy=="Gamma") %>%
+  group_by(org) %>%
+  mutate(
+    abs_dist = sum(abs(dnaa_dist))/sum(invs),
+    mean_abs_dist = mean(abs(dnaa_dist)),
+    posneg =
+      ifelse(
+        dnaa_dist>0,
+        "positive",
+        ifelse(
+          dnaa_dist<0,
+          "negative",
+          "zero"
+          )
+        )
+  ) %>% ## group by comparison, +ve or -ve
+  ungroup %>%
+  arrange(mean_abs_dist) %>%
+  mutate(
+    org = sub("_", " ", org),
+    org = factor(org, levels = rev(unique(org)))
+  ) %>%
+  filter(invs > 20) %>%
+  group_by(phylum, org, ref, qry, posneg) %>%
+  summarize(
+    mean_dnaa_dist = 
+      mean(dnaa_dist), 
+    invs = unique(invs)
+  ) %>% 
+  ungroup %>%
+  mutate(
+    organism_name = 
+      gsub(" ", "_", org)
+  ) %>%
+  left_join(
+    ., 
+    inv_summary2[,c(1,10)], 
+    by = "organism_name"
+  ) %>%
+  filter(clust2 >= 7) %>%
+  group_by(org) %>%
+  mutate(
+    mean_abs_dnaa_dist =
+      mean(abs(mean_dnaa_dist))
+  ) %>%
+  ungroup %>%
+  arrange(mean_abs_dnaa_dist) %>%
+  mutate(
+    org = factor(org, levels = rev(unique(org)))
+  )
+
+cgi2 <- 
+  left_join(
+    complete_gamma_invs, dori_summary, by = "org"
+  ) %>%
+  mutate(
+    invs2 = prettyNum(invs, big.mark = ",")
+  ) %>%
+  # mutate(
+  #   org = factor(org, levels = rev(unique(complete_gamma_invs$org)))
+  # ) %>%
+  rowwise() %>%
+  mutate(
+    org2 = 
+      (factor(paste0(org, " (", invs2, ")"))) %>%
+      fct_rev
+  ) %>%
+  ungroup
+
+gamma_dists <- 
+  ggplot(
+    cgi2, 
+    aes(x = mean_dnaa_dist, y = org, group = org, fill = mean_abs_dnaa_dist)
+  ) + 
+  theme_classic(base_size = 24) +
+  geom_density_ridges( 
+    rel_min_height = 0.05, scale =1,alpha = 0.6, bandwidth=0.025
+  ) +
+  # geom_label(
+  #     data = cgi2, 
+  #     aes(y = org, x = dd_mean, label = "|")
+  #     ) +
+  #scale_fill_gradient2(low = "cyan", mid = "darkgreen", high = "burlywood4") +
+  scale_fill_viridis_c(name = "Mean absolute dnaA distance", option = "C") +
+  theme(
+    legend.position="none",
+    #panel.grid.major = element_line()
+    panel.grid.major.y = element_line(color = "grey80")
+  ) +
+  scale_x_continuous(breaks = seq(-0.5, 0.5, 0.1),limits = c(-.5, 0.5)) +
+  ylab("") + 
+  xlab("Proportionate dnaA distance") +
+  geom_vline(xintercept = 0, linetype = "dashed", size = 0.5)
+
+
+final_gamma_plot <- 
+  gamma_dists +
+  geom_point(data = cgi2,
+               aes(x = dd_mean, y = org),
+               color = "red",
+               size = 1,
+               inherit.aes = FALSE)
+
+```
+
+
+
+```{r}
+
+all_report_summary <- 
+  readRDS("data/reports_summarized.rds") %>%
+  dplyr::select(
+    Phylum, org, genoforms, total_seqs, 
+    sequence_groups, inv_count, forms_per_seq, kmer_mean
+    )
+
+
+```
+
+```{r}
+ind_rep_tib <- readRDS("data/ind_rep_tib.rds")
+report_Ir <- 
+  inner_join(
+    all_report_summary,
+    rename(ind_rep_tib, species = "org"),
+    by = "org"
+  )
+
+report_ir2 <- 
+  report_Ir %>%
+  filter(!is.na(mean_IR))
+
+plot(report_Ir$mean_IR, report_Ir$kmer_mean)
+lm(report_Ir$mean_IR ~ report_Ir$kmer_mean) %>% summary()
+```
+
+
+```{r}
+ggplot(
+    report_summary,
+    aes(
+      x=forms_per_seq, y=0.001*kmer_mean, fill = Phylum)) + 
+    geom_point(size = 3, shape = 21) +
+  geom_smooth(
+    method = "lm", se=FALSE, 
+    inherit.aes = F, 
+    aes(group=1, x = forms_per_seq, y = 0.001*kmer_mean), 
+    colour = "black"
+    ) +
+    xlab("Proportion of colinear clusters") +
+    ylab("Index of repetitiveness")+
+    theme_classic() +
+    theme(
+      axis.text = element_text(size = 12),
+      axis.title = element_text(size = 14),
+      legend.title=element_text(size=16), 
+      legend.text=element_text(size=14),
+      legend.spacing.y = unit(0.5, 'cm')
+    ) +
+  scale_fill_brewer(palette="Paired")+ 
+    guides(
+      fill=guide_legend(title="Phylum", byrow = T)
+      )
+lm(forms_per_seq ~ kmer_mean, data = ar3) %>% summary
+## index of repetitiveness
+ggplot(
+    report_Ir,
+    aes(
+      x=forms_per_seq, y=mean_IR, fill = Phylum)) + 
+    geom_point(size = 3, shape = 21) +
+  geom_smooth(
+    method = "lm", se=FALSE, 
+    inherit.aes = F, 
+    aes(group=1, x = forms_per_seq, y = mean_IR), 
+    colour = "black"
+    ) +
+    xlab("Proportion of colinear clusters") +
+    ylab("Index of repetitiveness")+
+    theme_classic() +
+    theme(
+      axis.text = element_text(size = 12),
+      axis.title = element_text(size = 14),
+      legend.title=element_text(size=16), 
+      legend.text=element_text(size=14),
+      legend.spacing.y = unit(0.5, 'cm')
+    ) +
+  scale_fill_brewer(palette="Paired")+ 
+    guides(
+      fill=guide_legend(title="Phylum", byrow = T)
+      )
+lm(forms_per_seq ~ mean_IR, data = report_Ir) %>% summary
+    
+```
+
+
+
+```{r}
+midpoints_from_each <- 
+  lapply(
+    list.dirs("../mictools/r_vars"),
+    function(x){
+      list.files(x, full.names = T) %>%
+        grep("all_midpoints.rds", x = ., value = T)
+    }
+  ) %>%
+  unlist %>%
+  lapply(., 
+         function(x){
+           readRDS(x) %>%
+             mutate(organism = strsplit(x, "/")[[1]][2])
+           }
+         ) %>%
+  bind_rows
+
+ ggplot(
+    report_summary
+    ) +
+  stat_density(
+    aes(x=midpoint, y=..scaled..), 
+    geom = "line", position = "identity", trim = F, adjust=0.1
+    ) +
+  geom_bar(aes(x=midpoint, y=-0.1), stat="identity", width = 0.001) +
+  geom_text(aes(x=0, y=-0, label = "|")) +
+  geom_text(aes(x=0, y=-.09, label = "OriC")) +
+  xlim(0,1) +
+  theme(
+    legend.position = "none" , 
+    plot.title = element_text(hjust = 0.5, size = 14, vjust = -10),
+    axis.text = element_blank() ,
+    axis.ticks = element_blank(),
+    axis.title = element_blank()
+    ) +
+  ggtitle(sprintf("Gammaproteobacteria Inversion Midpoint Proportion")) +
+  scale_y_continuous(limits = c(-1, 1)) +
+  geom_hline(yintercept = -0.05) +
+  coord_polar() 
+
+```
+
+
+```{r}
+
+
+for (i in 1:length(phyla)){
+  phylum_i = 
+    phyla[i]
+  print(phylum_i)
+  if(file.exists(sprintf("ken/onesies/%s_onesies.rds", phylum_i))) next
+  phyla_tib <- 
+    #prev_ncbi_table %>%
+    current_ncbi_table %>%
+    filter(p2 == phylum_i) %>% 
+    count(species) %>%
+    filter(n>=10) %>%
+    arrange(n) %>%
+    mutate(species = as.character(species)) %>%
+    mutate(species2 = sub(" ", "_", species))
+  
+  phyla_report_paths <- 
+    list.dirs(
+      sprintf(
+        "results2/%s", phylum_i
+      ), 
+      full.names = T, recursive = F
+    )
+  phyla_vars <- 
+    list.dirs(
+      sprintf(
+        "r_vars/%s", phylum_i
+      ), 
+      full.names = T, recursive = F
+    )
+  
+  all(pull(phyla_tib, species2) %in% basename(phyla_report_paths)) &
+    all(basename(phyla_report_paths) %in% pull(phyla_tib, species2))
+  
+  
+  # basename(phyla_report_paths)[
+  #   which(!(basename(phyla_report_paths) %in% pull(phyla_tib, species2)))
+  #   ]
+  if (length(phyla_report_paths)==0) next
+  phyla_reports <-
+      pbmclapply(
+        phyla_report_paths, 
+        function(x){
+          fread(
+            sprintf("%s/report_summary.csv", x),
+            stringsAsFactors = F
+            ) %>%
+            mutate(
+              org = unlist(strsplit(x, "/"))[3]#,
+              # technology = as.character(technology),
+              # accession = as.character(accession),
+              # asm_name = as.character(asm_name),
+              # organism_name = as.character(organism_name),
+              # strain = as.character(strain)
+              ) %>%
+            as_tibble
+        }
+      )  %>% 
+    bind_rows %>%
+    add_count(org, name = "sequences") 
+  
+  if (!("clust") %in% colnames(phyla_reports)) next
+  
+  mult_clusts <- 
+    phyla_reports %>%
+    filter(clust_count>1) %>%
+    pull(organism_name) %>% unique
+  
+  phyla_summary <- 
+    phyla_reports %>%
+    group_by(org) %>% 
+    summarise(
+      clusts = length(unique(clust)), 
+      seqs = unique(sequences), 
+      kmer_mean = mean(kmer_prop, na.rm = T),
+      kmer_median = median(kmer_prop, na.rm = T),
+      .groups = "keep"
+    ) %>%
+    arrange(desc(clusts))
+  
+  phyla_summary %>% 
+    arrange(desc(seqs)) %>% View
+  
+   
+  phyla_invs <- 
+    pbmclapply(
+      pull(phyla_summary, org),
+      function(x){
+        #for (x in pull(Bacter_summary, org)){
+        # x <- "Wolbachia_endosymbiont"
+         r_file <- 
+           sprintf(
+             "r_vars/%s/%s/all_midpoints.rds",
+             phylum_i,
+             x
+             )
+         if (file.exists(r_file)){
+           outtib_ipc <- 
+             readRDS(r_file) %>%
+             group_by(ref, qry) %>%
+             summarise(invs = n(), .groups ="keep") %>%
+             ungroup %>%
+             summarise(
+               mean_ipc = mean(invs),
+               median_ipc = median(invs)
+             )
+           
+           outtib <- 
+             readRDS(r_file) %>%
+             group_by(ref, qry) %>%
+             summarise(
+               midmean  = mean(midpoint),
+               inversions = n()
+             ) %>%
+             mutate(org = x)  %>%
+             bind_cols(., outtib_ipc) %>%
+             filter(inversions==1 & !is.na(inversions))
+         } else{
+           outtib <- 
+             tibble(
+               midmean = NA,
+               midmedian = NA,
+               midsd = NA,
+               inversions = NA,
+               org = x, 
+               mean_ipc = NA,
+               median_ipc = NA
+             )
+         }
+         outtib <- 
+           outtib %>%
+           dplyr::select(5, 1:4, 6,7)
+         return(outtib)
+      }
+    ) %>% 
+    bind_rows %>%
+    filter(!(is.na(inversions)))
+  
+  # phyla_invs %>%
+  #   filter(org =="Yersinia_pseudotuberculosis")
+  
+  onesie_dirs <- 
+     unlist(
+          lapply(
+            1:nrow(phyla_invs),
+            function(i){
+               sprintf(
+                "nucmer/%s/%s/ava/%s_v_%s_filtered.delta",
+                phylum_i, phyla_invs$org[i], 
+                phyla_invs$ref[i], phyla_invs$qry[i]
+              )
+            }
+          )
+        )
+    
+  outdirf <- 
+    phyla_invs %>%
+    ungroup %>%
+    mutate(
+      nuc = 
+        unlist(
+          lapply(
+            1:nrow(phyla_invs),
+            function(i){
+               sprintf(
+                "nucmer/%s/%s/ava/%s_v_%s_filtered.delta",
+                phylum_i, phyla_invs$org[i], 
+                phyla_invs$ref[i], phyla_invs$qry[i]
+              )
+            }
+          )
+        )
+    )
+  if (nrow(outdirf)==0) next
+  onesie_sizes <- 
+    pbmclapply(
+      1:nrow(outdirf),
+      function(j){
+        #for(i in 1:nrow(outdirf)){
+        delt <- 
+          read_delta( pull(outdirf, nuc)[j]) %>%
+          filter_delta()
+        
+        if (
+          (sum(pull(delt, meanlen)) < pull(delt, rlen)[1]*0.7) |
+          nrow(delt)==0
+          ){
+          outt <- NA
+        } else {
+          outt <- 
+            delt %>%
+            filter(strand=="-") %>%
+            pull(meanlen) %>% 
+            sum/mean(c( pull(delt, rlen)[1],  pull(delt, qlen)[1]))
+        }
+        return(outt)
+        
+      }, mc.cores =7
+    ) %>% 
+    unlist# %>%
+    #keep( ~ !is.null(.) )
+  outdirf <-
+    outdirf %>% 
+    dplyr::select(c(1,4,5)) %>%
+    mutate(onesie_size = onesie_sizes)
+  
+  # outtest <-
+  #   outdirf %>% 
+  #   mutate(onesie_size = onesie_sizes) %>% filter(org=="Yersinia_pseudotuberculosis") %>%
+  #   pull(nuc)
+  # read_delta(outtest[3]) %>% filter_delta()
+  
+  outdirf %>%
+     filter(org =="Yersinia_pseudotuberculosis")
+  saveRDS(outdirf, sprintf("ken/onesies/%s_onesies.rds", phylum_i))
+}
+
+mp2 <- 
+  midpoint_table %>%
+  group_by(phy, species, ref, qry) %>%
+  summarise(invs = n(), mid_dist = mean(mid_dist), .groups = "keep") 
+
+
+onesie_sizes <- 
+  list()
+pb <- txtProgressBar(min = 1, max = nrow(mp2), initial = 1) 
+for (i in 1:nrow(mp2)){
+  nuc_file <- 
+       sprintf(
+        "nucmer/%s/%s/%s/ava/%s_v_%s_filtered.delta",
+        mp2$phy[i], 
+        strsplit(mp2$species[i], "_")[[1]][1], 
+        mp2$species[i], 
+        mp2$ref[i], mp2$qry[i]
+       )
+    delt <- 
+      read_delta(nuc_file) %>% #plot_delta
+      filter_delta()
+
+    if (
+      (sum(pull(delt, meanlen)) < pull(delt, rlen)[1]*0.7) |
+      #nrow(delt)==0 |
+      nrow(filter(delt, strand=="-"))!=1
+      ){
+      outt <- NA
+    } else {
+      outt <- 
+        delt %>%
+        filter(strand=="-") %>%
+        pull(meanlen) %>% 
+        sum/mean(c( pull(delt, rlen)[1],  pull(delt, qlen)[1]))
+    }
+    onesie_sizes[[i]] <- 
+      outt
+     setTxtProgressBar(pb,i)
+}
+
+
+onesie_tib <- 
+  bind_cols(
+    mp2,
+    tibble(
+      inv_length = unlist(onesie_sizes)
+    )
+    )
+  
+  
+onesie_lengths <- 
+    midpoint_table %>%
+    group_by(phy, species, ref, qry) %>%
+    mutate(invs = n()) %>%
+    ungroup %>%
+    mutate(
+      onesie_size = 
+        unlist(
+          pbmclapply(
+            1:nrow(midpoint_table),
+            function(i){
+              
+              nuc_file <- 
+                 sprintf(
+                  "nucmer/%s/%s/%s/ava/%s_v_%s_filtered.delta",
+                  midpoint_table$phy[i], 
+                  strsplit(midpoint_table$species[i], "_")[[1]][1], 
+                  midpoint_table$species[i], 
+                  midpoint_table$ref[i], midpoint_table$qry[i]
+                 )
+              delt <- 
+                read_delta( nuc_file) %>% #plot_delta
+                filter_delta()
+        
+              if (
+                (sum(pull(delt, meanlen)) < pull(delt, rlen)[1]*0.7) |
+                #nrow(delt)==0 |
+                nrow(filter(delt, strand=="-"))!=1
+                ){
+                outt <- NA
+              } else {
+                outt <- 
+                  delt %>%
+                  filter(strand=="-") %>%
+                  pull(meanlen) %>% 
+                  sum/mean(c( pull(delt, rlen)[1],  pull(delt, qlen)[1]))
+              }
+              return(outt)
+            }, mc.cores =7
+              )
+            
+          )
+        )
+  
+        
+        if (
+          (sum(pull(delt, meanlen)) < pull(delt, rlen)[1]*0.7) |
+          nrow(delt)==0
+          ){
+          outt <- NA
+        } else {
+          outt <- 
+            delt %>%
+            filter(strand=="-") %>%
+            pull(meanlen) %>% 
+            sum/mean(c( pull(delt, rlen)[1],  pull(delt, qlen)[1]))
+        }
+        return(outt)
+    
+
+
+
+# readRDS("../mictools/ken/onesies/Actinobacteria_onesies.rds")
+# onesie_size_tib <-
+#   read_csv("../mictools/stats/onese_size_tib.csv")
+reg_tib <- 
+  tibble(
+    dist_o = onesie_tib$mid_dist,
+    abs_dist = abs(dist_o),
+    time_r = 1-onesie_tib$inv_length,
+    org = 
+      onesie_tib$species,
+    phylum = 
+      onesie_tib$phy
+  ) %>% 
+  arrange(time_r)
+
+log_reg_tib <- 
+  reg_tib %>%
+  mutate(
+    log_dist = log(dist_o + 1)
+  )
+
+ggplot(
+  reg_tib, aes(x=time_r, y= dist_o)
+  ) +
+  geom_point(size=1, shape = 19)  + 
+  theme_classic(base_size = 18) +
+  geom_rect(
+    xmin = 0, xmax = 1, 
+    ymin = -0.01, ymax = 0.01, 
+    fill = alpha("lightblue", .02)
+    )  + 
+  #geom_smooth(method = "lm") +
+  xlab("Replication index") +
+  ylab("Proportionate distance from dnaA") 
+
+reg_tib_windows <- 
+  reg_tib %>%
+  mutate(
+    time_window =
+      cut(time_r, breaks=c(seq(0,1, 0.1))),
+    dist_window =
+      cut(dist_o, breaks=c(seq(-0.5,0.5, 0.1))),
+    window_label = 
+      paste(range(c(seq(0,1, 0.1))), collapse = "-")
+    ) %>%
+  group_by(time_window) %>%
+  mutate(
+    time_window_samples = n(),
+    dist_range_low = 
+      range(dist_o)[1],
+    dist_range_high = 
+      range(dist_o)[2],
+    mean_time = mean(time_r)
+    ) %>% 
+  ungroup() %>% 
+  group_by(dist_window) %>%
+  mutate(
+    dist_window_samples_0.1 = n()
+    ) %>%
+  ungroup %>%
+  mutate()
+  
+
+
+## within 0.01 prop dist
+(filter(
+  reg_tib_windows, 
+  dist_window=="(-0.1,0]" |
+    dist_window=="(0,0.1]"
+  ) %>% nrow)/nrow(reg_tib_windows)
+
+filter(reg_tib_windows, abs_dist <=0.01)
+(filter(reg_tib_windows, (dist_o <=0.1 & dist_o >=-0.1)) %>% nrow)/nrow(reg_tib_windows)
+(filter(reg_tib_windows, (dist_o <=0.5 & dist_o >=-0.5)) %>% nrow)/nrow(reg_tib_windows)
+
+(filter(reg_tib_windows, (dist_o <0)) %>% nrow)/nrow(reg_tib_windows)
+(filter(reg_tib_windows, (dist_o >0)) %>% nrow)/nrow(reg_tib_windows)
+       
+filter(reg_tib_windows, (dist_o >=0.05))
+
+
+filter(reg_tib_windows, dist_window=="(-0.5,-0.4]")
+
+filter(reg_tib_windows, dist_window=="(-0.5,-0.4]")
+fig_5a <- 
+  ggplot(
+    reg_tib_windows, #dist_window ==
+    aes(x=time_r, y= dist_o)
+    ) +
+    geom_point(size=1, shape = 19)  + 
+    # geom_rect(
+    #   xmin = 0, xmax = 1, 
+    #   ymin = -0.01, ymax = 0.01, 
+    #   alpha = 0.003, fill = "red"
+    #   )  + 
+    #geom_smooth(method = "lm") +
+    xlab("Replication index") +
+    ylab("Proportionate distance from dnaA") +
+    theme_classic(base_size = 18)+
+  labs(tag = "a)")
+
+    
+  
+rtw <- 
+  reg_tib_windows %>%
+  mutate(
+    tw2 =
+      cut(time_r, breaks=c(seq(0,1, 0.01)))
+    ) %>%
+  arrange(tw2) %>%
+  group_by(tw2) %>%
+  summarize(
+    mean_time = mean(time_r, na.rm = T),
+    mean_dist = mean(dist_o, na.rm = T),
+    tws = n(),
+    min_dist = min(dist_o, na.rm = T),
+    max_dist = max(dist_o, na.rm = T),
+    range_dist = max_dist-min_dist,
+    mean_range_dist = mean(range_dist, na.rm = T)
+  ) 
+lmfit_tws = lm(log(v) ~ t,data=daph)
+A = coef(lmfit)[1]
+B = coef(lmfit)[2]
+fig_5b <- 
+  ggplot(
+    rtw,
+    aes(x=mean_time, y= tws)
+    ) +
+    geom_point(size=3, shape = 19)  + 
+    #geom_smooth(method = "lm") +
+    xlab("Replication index") +
+    ylab("Inversion count") +
+    theme_classic(base_size = 18)+
+    labs(tag = "b)") + ylim(c(1,100))
+
+grid.arrange(fig_5a, fig_5b)
+
+
+
+ggplot(
+  rtw,
+  aes(x=mean_time, y= mean_range_dist)
+  ) +
+  geom_point(size=1, shape = 19)  + 
+  geom_smooth(method = "loess") +
+  xlab("Replication index") +
+  ylab("Mean range of proportionate distance") +
+  theme_classic(base_size = 18)
+
+ggplot(
+  rtw,
+  aes(x=mean_time, y= max_dist)
+  ) +
+  geom_point(size=1, shape = 19)  + 
+  #geom_smooth(method = "lm") +
+  xlab("Replication index") +
+  ylab("Mean range of proportionate distance") +
+  theme_classic(base_size = 18) + geom_smooth()
+
+ggplot(
+  rtw,
+  aes(x=mean_time, y= min_dist)
+  ) +
+  geom_point(size=1, shape = 19)  + 
+  #geom_smooth(method = "lm") +
+  xlab("Replication index") +
+  ylab("Mean range of proportionate distance") +
+  theme_classic(base_size = 18) + geom_smooth()
+
+
+
+install.packages("ggpointdensity")
+library(ggpointdensity)
+ggplot(
+  reg_tib_windows, aes(x=time_r, y= dist_o)
+  ) +
+  geom_pointdensity(adjust = 1) +
+  #scale_color_viridis(option = "C") +
+   #geom_point(size=1, shape = 19)  + 
+  theme_classic(base_size = 18) +
+  # geom_rect( rtw,
+  #   xmin = mean_time-0.5, xmax = mean_time+0.5,
+  #   ymin = -0.01, ymax = 0.01,
+  #   fill = alpha("lightblue", .02)
+  #   )  +
+  # geom_rect(
+  #   xmin = 0, xmax = 1,
+  #   ymin = -0.01, ymax = 0.01,
+  #   fill = alpha("lightblue", .02)
+  #   )  +
+  #geom_smooth(method = "lm") +
+  xlab("Replication index") +
+  ylab("Proportionate distance from dnaA") +
+  theme(legend.position = "none")
+
+ggplot(
+  reg_tib_windows, aes(x=time_window, y= dist_o, fill = time_window_samples)
+  ) +
+  geom_violin()  + 
+  #geom_pointdensity(adjust = 1) +
+  scale_color_viridis() +
+  #geom_jitter(shape=16, position=position_jitter(0.2)) +
+  theme_classic(base_size = 18) +
+  xlab("Replication index") +
+  ylab("Proportionate distance from dnaA") +
+  theme(legend.position = "none")
+
+
+ggplot(
+  reg_tib_windows, aes(x=time_r, y= dist_o)
+  ) +
+  #geom_pointdensity(adjust = 1) +
+  # scale_color_viridis(option = "C") +
+  geom_point(size=1, shape = 19)  + 
+  theme_classic(base_size = 18) +
+  geom_rect( rtw,
+    xmin = mean_time-0.5, xmax = mean_time+0.5,
+    ymin = -0.01, ymax = 0.01,
+    fill = alpha("lightblue", .02)
+    )  +
+  # geom_rect(
+  #   xmin = 0, xmax = 1,
+  #   ymin = -0.01, ymax = 0.01,
+  #   fill = alpha("lightblue", .02)
+  #   )  +
+  #geom_smooth(method = "lm") +
+  xlab("Replication index") +
+  ylab("Proportionate distance from dnaA") +
+  theme(legend.position = "none")
+
+
+fit_dist_0.01 <- 
+  fitdistr(rtw_over_75$mean_range_dist, "exponential")
+
+ks.test(rtw_over_75$mean_range_dist, "pexp", fit_dist_0.01$estimate)
+
+
+rtw_less_75 <- 
+  rtw %>% filter(mean_time<0.75)
+rtw_over_75 <- 
+  rtw %>% filter(mean_time>=0.75)
+
+reg_tib_windows %>% pull(dist_o) %>% mean
+
+fit_dist_0.01 <- 
+  fitdistr(rtw_over_75$mean_range_dist, "exponential")
+
+ks.test(rtw_over_75$mean_range_dist, "pexp", fit_dist_0.01$estimate)
+
+rtw_less_60 <- 
+  rtw %>% filter(mean_time<0.60)
+rtw_over_60 <- 
+  rtw %>% filter(mean_time>=0.60)
+
+
+fit_dist_0.01_60 <- 
+  fitdistr(rtw_over_60$mean_range_dist, "exponential")
+
+ks.test(rtw_over_60$mean_range_dist, "pexp", fit_dist_0.01_60$estimate)
+
+rtw_less_50 <-  
+  rtw %>% filter(mean_time<0.50)
+rtw_over_50 <- 
+  rtw %>% filter(mean_time>=0.50)
+
+fit_dist_0.01_50 <- 
+  fitdistr(rtw_over_50$mean_range_dist, "exponential")
+
+ks.test(rtw_over_50$mean_range_dist, "pexp", fit_dist_0.01_50$estimate)
+
+rtw$mean_range_dist
+
+reg_tib_windows2 <- 
+  reg_tib %>%
+  split(., ceiling(seq_along(1:nrow(reg_tib))/30)) 
+
+group_42 <- 
+  lapply(
+    1:length(reg_tib_windows2),
+    function(i){
+      out_tib <- 
+        reg_tib_windows2[[i]] %>%
+        mutate(window_group = i)
+    }) %>% bind_rows
+
+group_42_windows_var <- 
+  group_42 %>%
+  group_by(window_group) %>%
+    summarise(
+      dist_var = 
+        var(dist_o),
+      `10%` = quantile(dist_o, 0.1),
+      `90%` = quantile(dist_o, 0.9),
+      Minimum = min(dist_o),
+      Maximum = max(dist_o),
+      window_samples = n(),
+      mean_time = mean(time_r)
+    ) %>% 
+  ungroup 
+
+
+
+
+reg_tib_windows_var_gg2 <- 
+  group_42_windows_var %>%
+  dplyr::select(c(1,5,6,8)) %>%
+  pivot_longer(
+    !c(window_group,mean_time), 
+    names_to = "minmax", values_to = "dist_o"
+    )
+
+max_lm <- 
+  lm(mean_time~dist_o, filter(reg_tib_windows_var_gg2, minmax=="Maximum"))
+min_lm <- 
+  lm(mean_time~dist_o, filter(reg_tib_windows_var_gg2, minmax=="Minimum"))
+summary(max_lm)
+summary(min_lm)
+both_lm <- 
+  lm(mean_time~dist_o, (reg_tib_windows_var_gg2))
+both_lm
+summary(both_lm)
+
+
+```
+
