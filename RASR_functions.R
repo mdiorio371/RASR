@@ -449,19 +449,7 @@ sync_with_gff <-
                 ]
             genome_length <- 
               width(genome_seq)
-            ## check if dnaa is annotated
-            # dnaA_vect <- 
-            #   gff %>% 
-            #   as_tibble() %>% 
-            #   filter(
-            #     (grepl(
-            #       "dnaA", attributes, ignore.case = T
-            #     ) |
-            #       grepl(
-            #         "product=chromosome replication initiator DnaA", 
-            #         attributes, ignore.case = T
-            #       ))
-            #   ) %>% pull(attributes)
+
             dnaA_vect <- 
               gff %>% 
               as_tibble() %>% 
