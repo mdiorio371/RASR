@@ -4,8 +4,9 @@
 
 
 
-# RASR
-Prokaryotic rearrangements symmetric to the replication origin are identified across 247 bacterial species. Large-scale inversions are found to be highly prevalent across species, and their mediating factors are examined. 
+# Replication-associated inversions are the dominant form of bacterial chromosome structural variation
+
+Prokaryotic rearrangements symmetric to the replication origin are identified across bacterial species with multiple complete genomes available in the Refseq database (n=247). Large-scale inversions are found to be highly prevalent across species, and their mediating factors are examined. The manuscript was published in [Life Science Alliance]([https://github.com/mdiorio371/SVMC](https://www.life-science-alliance.org/content/6/1/e202201434) and is accessible [here](docs/RASR_publication.pdf).
 
 
 <details>
@@ -15,8 +16,12 @@ The structural arrangements of bacterial chromosomes vary widely between closely
 
 
 
-### RASRs identified across bacterial phyla ###
-<img src="figures/RASR_prevalence.png" width="600"/>
+### RASRs are identified across bacterial phyla ###
+
+<p align="center">
+  <img src="figures/RASR_prevalence.png" width="500"/>
+</p>
+
 
 
 ### Structural variant distributions correspond with the Origin of replication ###
