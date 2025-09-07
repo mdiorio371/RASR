@@ -26,7 +26,7 @@ The structural arrangements of bacterial chromosomes vary widely between closely
 
 ### Structural variant distributions correspond with the Origin of replication ###
 <p align="center">
-  <img src="figures/RASR_Gamma.png" width="45%"/>
+  <img src="figures/RASR_gamma.png" width="45%"/>
   <img src="figures/RASR_other.png" width="45%"/>
 </p>
 
