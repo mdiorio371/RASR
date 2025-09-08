@@ -30,4 +30,6 @@ The structural arrangements of bacterial chromosomes vary widely between closely
   <img src="figures/RASR_other.png" width="45%"/>
 </p>
 
+Structural rearrangement midpoint distributions for species with at least 40 complete genomes. Point 0 represents the position of the annotated dnaA gene. The red points indicate the approximate positions of the closest origin available predicted by the [Doric database](https://pubmed.ncbi.nlm.nih.gov/30364951/). 
+
 
